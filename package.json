@@ -1,0 +1,12 @@
+{
+  "name": "router-tasks",
+  "version": "0.2.8",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/Plugins.RouterTasks/Web/app.js && node --check src/Plugins.RouterTasks/Web/core.js",
+    "test": "node --test tests/ui/*.test.mjs",
+    "test:browser": "node tools/browser-smoke.mjs"
+  },
+  "devDependencies": { "jsdom": "26.1.0", "playwright": "1.54.2" }
+}

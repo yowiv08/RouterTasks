@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/Plugins.RouterTasks/Plugins.RouterTasks.csproj" />
+  <Project Path="tests/RouterTasks.Tests/RouterTasks.Tests.csproj" />
+</Solution>

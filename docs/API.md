@@ -1,0 +1,127 @@
+# 管理接口
+
+路由前缀：`/api/plugins/router-tasks/`。使用宿主管理员会话，写请求由宿主校验 CSRF。
+
+页面通过 `window.Router2API.request(method, route, body)` 调用。
+
+## 账号接口
+
+| 方法 | 路由 | 功能 |
+| --- | --- | --- |
+| GET | state | 账号任务、连接元数据、模板摘要、运行状态 |
+| GET | accounts/detail?id=ID | 账号配置、站点、完整 API Key、通知凭据与修订号 |
+| POST | accounts/save | 统一保存账号连接、请求参数、通知和日志设置 |
+| POST | accounts/preview | 展开完整请求内容 |
+| POST | accounts/query | 使用当前站点地址和 API Key 查询模型与额度 |
+| POST | accounts/delete | 删除账号及其任务、日志和通知配置 |
+| GET | accounts/export?id=ID | 导出包含完整凭据和模板的账号 JSON |
+| GET | tasks/detail?id=ID&laneOffset=0 | 账号任务的快照、日志、每日统计、通知与分页线程状态 |
+| POST | tasks/action | 单账号或批量控制任务 |
+| POST | keys/refresh | 查询账号模型和额度 |
+| POST | notifications/resume | 恢复指定账号的暂停通知 |
+
+### 保存账号
+
+```json
+{
+  "config": {
+    "id": "account-1",
+    "name": "日常账号",
+    "model": "MODEL",
+    "mode": "queue_then_keepalive",
+    "templateId": "responses",
+    "settings": {
+      "telegramEnabled": true,
+      "barkEnabled": false,
+      "maxEventsPerTask": 200
+    }
+  },
+  "site": {
+    "name": "日常账号",
+    "baseUrl": "https://TARGET",
+    "route": "direct",
+    "queueHttpStatuses": [500]
+  },
+  "token": "TOKEN",
+  "secrets": {
+    "telegramToken": "TOKEN",
+    "telegramChatId": "CHAT_ID",
+    "credentialVersion": 0
+  }
+}
+```
+
+编辑时传入 `expectedRevision`、`credentialVersion`、`site.revision` 和 `secrets.credentialVersion`，使用账号详情返回的修订号。
+
+`config.settings` 保存此账号的通知渠道、重试参数和日志保留限制。`secrets` 保存此账号的通知凭据，空字段清除对应值。
+
+保存时自动关联内部站点和 Key，账号名称同时用作 Key 别名。
+
+### 通知恢复
+
+```json
+{"id":"account-1"}
+```
+
+只恢复指定账号的暂停记录。
+
+## 任务控制
+
+```json
+{"ids":["account-1"],"action":"resume"}
+```
+
+`action` 支持 `start`、`pause`、`resume`、`cancel`、`retry`、`requeue`、`restart`。
+
+`retry` 保留预算，`requeue` 开始新排队轮次，`restart` 创建新运行记录。批量请求逐项返回执行结果。
+
+## 请求模板
+
+| 方法 | 路由 | 功能 |
+| --- | --- | --- |
+| GET | templates/detail?id=ID | 读取完整模板 |
+| POST | templates/save | 保存完整模板 |
+
+```json
+{
+  "id":"responses-custom",
+  "name":"自定义 Responses",
+  "protocol":"responses",
+  "path":"responses",
+  "headers":{"Authorization":"Bearer {{TOKEN}}"},
+  "body":"{\"model\":\"{{MODEL}}\",\"input\":\"{{PROMPT}}\",\"stream\":true}"
+}
+```
+
+`body` 返回为 JSON 文本，写入时接受文本或对象，保留大整数和小数精度。
+
+页面按协议选择接口：OpenAI Responses 使用 `/v1/responses`，Anthropic Messages 使用 `/v1/messages`；不需要填写自定义接口。
+
+## 任务字段
+
+- `mode`：`queue`、`keepalive`、`queue_then_keepalive`。
+- `autoRequeue`：自动重新排队开关。
+- `useSourcePrompt`：默认 `false`，使用 `prompt` 固定提示词；`true` 时成功获取源码后仅使用 Linux 源码分析提示词，不拼接固定提示词。获取失败时使用已有源码缓存；无缓存则回退到 `prompt` 固定提示词。
+- `sourcePromptCacheMinutes`：Linux 源码成功缓存时长，单位为分钟（支持小数），范围 `0`–`2000000`，默认 `360`（6 小时）；旧配置缺少字段时使用默认值。`0` 表示每次请求尝试刷新，正数到期后由下一次请求刷新。片段缓存共享，刷新条件按各账号配置判断；失败重试单独退避 10 分钟，不限制成功后的缓存过期刷新。账号复制、导入、导出和运行快照保留该字段。
+- `claude1MContext`：Claude 1M 上下文开关，默认 `true`；仅影响 Messages 请求。关闭时移除 1M 上下文标记。
+- `queueHttpStatuses`：状态码数组；`null` 使用站点规则。
+- `queue`、`keepalive`：排队与保活阶段参数。
+- `requestOverride`：账号专用请求模板。
+- `settings`：账号独立通知与日志设置。
+- `notificationEvents`：`entered`、`dropped`、`recovered`、`stopped`、`paused`、`exhausted`。
+- `runtime.status`：`running`、`recovering`、`paused`、`completed`、`failed`、`exhausted`、`cancelled`。
+- `runtime.phase`：`queue` 或 `keepalive`。
+- `runtime.sessionConfirmed`：本次运行已确认接受事件。
+- `runtime.totalAttempts`：累计请求尝试次数。
+
+## 配置接口
+
+`sites/save`、`sites/delete`、`keys/save`、`keys/delete`、`keys/reconcile`、`tasks/save`、`tasks/delete`、`requests/preview`、`settings/save`、`config/export`、`config/import` 提供分项配置读写。
+
+`config/export` 导出业务配置；`accounts/export` 导出包含凭据的完整账号配置。
+
+## 状态码
+
+400 参数错误；404 资源不存在；409 修订冲突或操作不适用；503 插件停止或存储不可用。
+
+宿主管理接口请求体上限为 1 MiB。
