@@ -151,4 +151,6 @@ pwsh -File .\package-release.ps1
 
 ## GitHub 自动发行
 
-仓库的 `v*` 标签会触发 GitHub Actions：使用 .NET 10 构建插件，生成 `router-tasks.zip`、SHA-256、`release-index.json` 和发行说明，并自动发布 GitHub Release。手动运行工作流时可填写 `v0.2.8` 格式的标签；手动运行只打包，不创建 Release。
+仓库的 `v*` 标签会触发 GitHub Actions：使用 .NET 10 构建插件，生成 `router-tasks.zip`、SHA-256、`release-index.json` 和发行说明，并自动发布 GitHub Release。标签必须与插件版本一致。
+
+手动运行 `Release RouterTasks` 时默认只打包：`tag` 留空使用所选分支，填写后构建指定的已有标签。勾选 `publish_release` 可以从该标签发布 Release，必须明确填写标签，不会创建、移动或覆盖 Git 标签。构建产物保留 14 天；发行文件长期保存在 Release。

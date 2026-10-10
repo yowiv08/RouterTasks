@@ -6,9 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 打包版本标签（须与所选分支或标签的插件版本一致，留空自动读取）
+        description: 已有版本标签（留空则只打包所选分支）
         required: false
         type: string
+      publish_release:
+        description: 将指定标签的构建产物发布到 Release（默认只打包）
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -24,18 +29,22 @@ jobs:
       tag: ${{ steps.package.outputs.tag }}
     steps:
       - name: Validate release tag
-        if: github.event_name == 'push'
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
         run: |
-          if ($env:RELEASE_TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+          if ($env:RELEASE_TAG -and $env:RELEASE_TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
             throw "Invalid release tag: $env:RELEASE_TAG"
+          }
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and
+              $env:PUBLISH_RELEASE -eq 'true' -and -not $env:RELEASE_TAG) {
+            throw 'Publishing manually requires an existing version tag.'
           }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          ref: ${{ github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: '10.0.x'
@@ -76,7 +85,7 @@ jobs:
           retention-days: 14
 
   publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
     needs: build
     runs-on: ubuntu-latest
     permissions:
