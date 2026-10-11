@@ -15,7 +15,7 @@ namespace Plugins.RouterTasks;
 [ModelCache(Disabled = true)]
 public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModule, IPluginMainPageProvider
 {
-    public const string Version = "0.2.8";
+    public const string Version = "0.2.9";
     private readonly IPluginServices _host;
     private readonly CredentialVault _vault;
     private readonly SourcePromptService _sources;

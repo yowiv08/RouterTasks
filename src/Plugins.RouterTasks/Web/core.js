@@ -47,7 +47,7 @@
       barkServer:'https://api.day.app',notificationMaxAttempts:10,notificationRetrySeconds:5,notificationMaxRetrySeconds:3600,maxNotificationRecords:1000};
   }
   const modes = { queue: '仅排队', keepalive: '持续保活', queue_then_keepalive: '排队后持续保活' };
-  const eventNames = { entered: '首次进入', dropped: '确认掉线', recovered: '恢复', stopped: '永久错误', paused: '自动暂停', exhausted: '预算耗尽' };
+  const eventNames = { entered: '首次进入', dropped: '确认掉线', recovered: '确认掉线后恢复', stopped: '错误停止', paused: '自动暂停', exhausted: '次数预算耗尽' };
   function parseCodes(text, inherit = false) {
     if (!text.trim()) return inherit ? null : [];
     const values = text.trim().split(/[\s,，]+/).map(value => {
@@ -69,7 +69,7 @@
     const r = task.runtime;
     if (r.status !== 'running' && r.status !== 'recovering') return { label: ({ paused: '已暂停', completed: '已完成', failed: '错误停止', exhausted: '预算耗尽', cancelled: '已取消' })[r.status] || r.status,
       tone: r.status === 'completed' ? 'ok' : ['failed', 'exhausted'].includes(r.status) ? 'bad' : 'muted' };
-    if (r.status === 'recovering') return { label: '掉线恢复中', tone: 'warn' };
+    if (r.status === 'recovering') return { label: r.outageNotified ? '掉线恢复中' : '掉线观察中', tone: 'warn' };
     return r.phase === 'queue' ? { label: '排队中', tone: 'warn' } : { label: r.sessionConfirmed ? '保活中' : '等待心跳确认', tone: r.sessionConfirmed ? 'ok' : 'warn' };
   }
   function remaining(key) {

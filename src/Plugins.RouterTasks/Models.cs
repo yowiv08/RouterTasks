@@ -122,7 +122,10 @@ public sealed record TaskRuntime
     public bool SessionConfirmed { get; set; }
     public DateTimeOffset? MonitoringSince { get; set; }
     public long OutageSequence { get; set; }
+    // 本次故障的确认状态，与通知投递状态独立。
     public bool OutageNotified { get; set; }
+    // 失联观察开始时间。
+    public DateTimeOffset? DropPendingSince { get; set; }
     public string? PauseReason { get; set; }
     public string? LastError { get; set; }
     public int? LastHttpStatus { get; set; }

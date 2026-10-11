@@ -24,7 +24,8 @@ test('默认值、三种模式、HTTP 状态码继承和覆盖', async t=>{
 test('历史成功不能显示为当前保活，三阶段状态文案准确', async t=>{
   const h=await harness();t.after(h.close); const runtime={status:'running',phase:'keepalive',lastSuccessAt:new Date().toISOString(),sessionConfirmed:false};
   assert.equal(h.U.status({runtime}).label,'等待心跳确认');runtime.sessionConfirmed=true;assert.equal(h.U.status({runtime}).label,'保活中');
-  runtime.status='paused';assert.equal(h.U.status({runtime}).label,'已暂停');runtime.status='recovering';assert.equal(h.U.status({runtime}).label,'掉线恢复中');
+  runtime.status='paused';assert.equal(h.U.status({runtime}).label,'已暂停');runtime.status='recovering';assert.equal(h.U.status({runtime}).label,'掉线观察中');
+  runtime.outageNotified=true;assert.equal(h.U.status({runtime}).label,'掉线恢复中');
   runtime.status='running';runtime.phase='queue';assert.equal(h.U.status({runtime}).label,'排队中');
 });
 

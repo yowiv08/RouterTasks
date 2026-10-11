@@ -71,6 +71,7 @@ internal sealed class TaskStore(string directory, Func<List<RequestTemplate>> pr
                 }
                 item.Runtime.Generation = null;
                 item.Runtime.SessionConfirmed = false;
+                item.Runtime.FailureSince = null; item.Runtime.DropPendingSince = null;
                 item.Runtime.NextAttemptAt = null;
                 foreach (var lane in item.Runtime.Lanes) { lane.NextAttemptAt = null; lane.Status = "stopped"; }
             }
@@ -142,10 +143,22 @@ internal sealed class TaskStore(string directory, Func<List<RequestTemplate>> pr
         var channels = new List<string>();
         if (settings.TelegramEnabled) channels.Add("telegram");
         if (settings.BarkEnabled) channels.Add("bark");
+        var scope = kind switch
+        {
+            "entered" => $"{task.Runtime.RunId}:entered",
+            "dropped" or "recovered" => $"{task.Runtime.RunId}:outage:{task.Runtime.OutageSequence}:{kind}",
+            _ => $"{task.Runtime.RunId}:{task.Runtime.Phase}:round:{task.Runtime.QueueRound}:attempt:{task.Runtime.TotalAttempts}:outage:{task.Runtime.OutageSequence}:{kind}"
+        };
+        var title = kind switch
+        {
+            "entered" => "首次进入", "dropped" => "确认掉线", "recovered" => "掉线后恢复",
+            "stopped" => "错误停止", "paused" => "自动暂停", "exhausted" => "预算耗尽", _ => kind
+        };
         foreach (var channel in channels)
         {
-            var id = $"{task.Runtime.RunId}:{task.Runtime.QueueRound}:{task.Runtime.OutageSequence}:{kind}:{channel}";
-            if (document.Notifications.Any(n => n.Id == id)) continue;
+            var id = $"{scope}:{channel}";
+            var legacyId = $"{task.Runtime.RunId}:{task.Runtime.QueueRound}:{task.Runtime.OutageSequence}:{kind}:{channel}";
+            if (document.Notifications.Any(n => n.Id == id || n.Id == legacyId)) continue;
             while (document.Notifications.Count(n => n.TaskId == task.Config.Id) >= settings.MaxNotificationRecords)
             {
                 var old = document.Notifications.Where(n => n.TaskId == task.Config.Id && n.State is "sent" or "dead").MinBy(n => n.CreatedAt);
@@ -161,7 +174,8 @@ internal sealed class TaskStore(string directory, Func<List<RequestTemplate>> pr
             }
             document.Notifications.Add(new NotificationItem { Id = id, TaskId = task.Config.Id, Kind = kind,
                 ProfileId = task.Config.Settings is null ? CredentialVault.ProfileId : CredentialVault.AccountProfile(task.Config.Id),
-                Channel = channel, Title = TextOutput.Summary($"RouterTasks · {task.Config.Name} · {kind}"), Message = TextOutput.Summary(message),
+                Channel = channel, Title = TextOutput.Summary($"RouterTasks · {task.Config.Name} · {title}"),
+                Message = $"发生时间：{at.ToOffset(TimeSpan.FromHours(8)):yyyy-MM-dd HH:mm:ss}（UTC+8）\n{TextOutput.Summary(message)}",
                 CreatedAt = at, NextAttemptAt = at });
         }
     }

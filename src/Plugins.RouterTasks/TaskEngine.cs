@@ -35,6 +35,7 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
                         task.Runtime.Status = action == "cancel" ? "cancelled" : "paused";
                         task.Runtime.PauseReason = action == "cancel" ? "用户取消" : "用户暂停";
                         task.Runtime.NextAttemptAt = null;
+                        task.Runtime.FailureSince = null; task.Runtime.DropPendingSince = null;
                     }
                     return true;
                 }, token);
@@ -67,7 +68,8 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
                 runtime.Generation = generation; runtime.Status = "running";
                 runtime.PauseReason = null; runtime.NextAttemptAt = null;
                 runtime.SessionConfirmed = false; runtime.MonitoringSince = clock.Now;
-                runtime.FailureSince = null; runtime.OutageNotified = false;
+                runtime.FailureSince = null; runtime.DropPendingSince = null;
+                // 继续运行清除观察计时，保留已确认故障。
                 task.Snapshot = new SavedRunSnapshot(snapshot.Config, snapshot.Site, snapshot.Template, snapshot.Settings, clock.Now);
                 // 继续不复用旧连接，不退款已记录的尝试。历史接受不能冒充当前心跳。
                 TaskStore.AddEvent(document, task, clock.Now, action, "任务启动/继续；请求使用新的配置快照");
@@ -118,48 +120,49 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
                     continue;
                 }
                 if (result.Error == "budget_exhausted") { await StopWithAsync(active, "exhausted", "当前阶段所有线程的次数预算已耗尽", "exhausted"); return; }
-                if (result.Kind is ProbeKind.Permanent or ProbeKind.Protocol)
+                if (result.Kind == ProbeKind.Permanent)
                 { await StopWithAsync(active, "failed", result.Error ?? "永久错误", "stopped"); return; }
-                if (!queue && result.Kind == ProbeKind.Busy)
-                {
-                    await ChangeAsync(active, (document, task) =>
-                    {
-                        if (task.Runtime.FailureSince is null) task.Runtime.OutageSequence++;
-                        task.Runtime.FailureSince ??= clock.Now;
-                        task.Runtime.SessionConfirmed = false;
-                        if (!task.Runtime.OutageNotified)
-                        {
-                            task.Runtime.OutageNotified = true;
-                            TaskStore.Notify(document, task, clock.Now, "dropped", "收到配置的排队状态码，需要重新排队");
-                        }
-                    });
-                    if (!await RequeueAsync(active, result.Error ?? "命中排队状态码")) return;
-                    if (result.RetryAfterSeconds > 0) await WaitAsync(active, null, result.RetryAfterSeconds, token);
-                    continue;
-                }
+                var retryNetwork = queue ? active.Snapshot.Config.Queue.RetryNetworkErrors : active.Snapshot.Config.Keepalive.RetryNetworkErrors;
+                var retryTimeout = queue ? active.Snapshot.Config.Queue.RetryTimeouts : active.Snapshot.Config.Keepalive.RetryTimeouts;
+                if (result.Kind == ProbeKind.Network && !retryNetwork || result.Kind == ProbeKind.Timeout && !retryTimeout)
+                { await StopWithAsync(active, "paused", $"{result.Error ?? result.Kind.ToString()}；对应失败重试已关闭，任务自动暂停", "paused"); return; }
                 if (!queue)
                 {
                     var settings = active.Snapshot.Config.Keepalive;
-                    if (result.Kind == ProbeKind.Network && !settings.RetryNetworkErrors || result.Kind == ProbeKind.Timeout && !settings.RetryTimeouts)
-                    { await StopWithAsync(active, "failed", result.Error ?? "已关闭失败重试", "stopped"); return; }
                     var dropped = false;
                     await ChangeAsync(active, (document, task) =>
                     {
                         var state = task.Runtime;
-                        if (state.FailureSince is null) state.OutageSequence++;
                         state.FailureSince ??= clock.Now;
-                        var last = state.LastSuccessAt > state.MonitoringSince ? state.LastSuccessAt!.Value : state.MonitoringSince ?? state.FailureSince.Value;
-                        var elapsed = (clock.Now - last).TotalSeconds;
-                        if (elapsed >= settings.IdleEvictionSeconds) { state.Status = "recovering"; state.SessionConfirmed = false; }
-                        dropped = elapsed >= settings.IdleEvictionSeconds + settings.DropConfirmSeconds;
+                        // 仅监测已确认会话的失联时长。
+                        if (!state.SessionConfirmed && state.DropPendingSince is null) return;
+                        var last = state.LastSuccessAt ?? state.MonitoringSince ?? state.FailureSince.Value;
+                        if ((clock.Now - last).TotalSeconds < settings.IdleEvictionSeconds) return;
+                        if (state.DropPendingSince is null)
+                        {
+                            state.DropPendingSince = clock.Now;
+                            state.Status = "recovering"; state.SessionConfirmed = false;
+                            TaskStore.AddEvent(document, task, clock.Now, "drop-observing", "失联窗口已结束，进入掉线观察");
+                        }
+                        var observed = (clock.Now - state.DropPendingSince.Value).TotalSeconds;
+                        dropped = observed >= settings.DropConfirmSeconds;
                         if (dropped && !state.OutageNotified)
                         {
-                            state.OutageNotified = true;
-                            TaskStore.AddEvent(document, task, clock.Now, "dropped", "超过失联与掉线确认窗口");
-                            TaskStore.Notify(document, task, clock.Now, "dropped", "超过失联与掉线确认窗口");
+                            state.OutageNotified = true; state.OutageSequence++;
+                            var reason = $"距上次成功已 {(clock.Now - last).TotalSeconds:F0} 秒，进入掉线观察后持续 {observed:F0} 秒仍未收到正式 SSE 接受事件";
+                            TaskStore.AddEvent(document, task, clock.Now, "dropped", reason);
+                            // 同一故障的掉线与自动暂停共用一条通知。
+                            var kind = active.Snapshot.Config.AutoRequeue || task.Config.NotificationEvents.Contains("dropped") ? "dropped" : "paused";
+                            var action = active.Snapshot.Config.AutoRequeue ? "将自动重新排队" : "自动重新排队已关闭，任务自动暂停，需手动处理";
+                            TaskStore.Notify(document, task, clock.Now, kind, $"{task.Config.Model}：{reason}；{action}。最近错误：{result.Error ?? result.Kind.ToString()}");
                         }
                     });
-                    if (dropped) { if (!await RequeueAsync(active, "已确认掉线")) return; }
+                    if (dropped)
+                    {
+                        if (!await RequeueAsync(active, "已确认掉线")) return;
+                        var q = active.Snapshot.Config.Queue;
+                        await WaitAsync(active, null, Math.Max(Jitter(q.IntervalSeconds, q.IntervalMaxSeconds), result.RetryAfterSeconds), token);
+                    }
                     else await WaitAsync(active, null, Math.Max(settings.FailureRetrySeconds, result.RetryAfterSeconds), token);
                 }
             }
@@ -171,6 +174,7 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
                 var reading = task.Runtime.ResponseState == "reading";
                 task.Runtime.Status = active.StopReason;
                 task.Runtime.SessionConfirmed = false;
+                task.Runtime.FailureSince = null; task.Runtime.DropPendingSince = null;
                 if (reading) task.Runtime.ResponseState = "interrupted";
                 task.Runtime.PauseReason = reading ? "已接受的响应被取消；不自动重放" : "用户操作或插件停止；在途结果可能未确认";
                 TaskStore.AddEvent(document, task, clock.Now, task.Runtime.Status, task.Runtime.PauseReason);
@@ -226,7 +230,8 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
                     {
                         var state = task.Runtime;
                         var first = !state.Entered;
-                        var recovered = state.Entered && (queue || state.FailureSince is not null);
+                        var recovered = state.Entered && state.OutageNotified;
+                        var transientRecovery = !first && !recovered && state.FailureSince is not null;
                         state.Entered = true; state.AcceptedAt ??= clock.Now; state.LastSuccessAt = clock.Now;
                         state.SessionConfirmed = true; state.MonitoringSince = clock.Now;
                         state.LastHttpStatus = status; state.LastError = null; state.MatchedRule = "SSE accepted";
@@ -237,9 +242,11 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
                             var kind = first ? "entered" : "recovered";
                             if (recovered) state.Recoveries++;
                             TaskStore.Count(document, clock.Now, active.Snapshot.Template.Protocol, kind, task.Config.Id);
-                            TaskStore.Notify(document, task, clock.Now, kind, $"{task.Config.Model} 收到正式 SSE 接受事件");
+                            TaskStore.Notify(document, task, clock.Now, kind, $"{task.Config.Model} {(first ? "首次进入" : "确认掉线后已恢复")}，收到正式 SSE 接受事件");
                         }
-                        state.FailureSince = null; state.OutageNotified = false;
+                        if (transientRecovery)
+                            TaskStore.AddEvent(document, task, clock.Now, "heartbeat-resumed", "心跳已恢复");
+                        state.FailureSince = null; state.DropPendingSince = null; state.OutageNotified = false;
                         state.Lanes[index].Status = "accepted";
                         TaskStore.AddEvent(document, task, clock.Now, "accepted", "收到正式 SSE 接受事件；其余线程停止", index + 1);
                     });
@@ -293,16 +300,17 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
                             });
                         }
                         finally { decision.Release(); }
-                        var retry = result.Kind == ProbeKind.Busy || result.Kind == ProbeKind.Network && active.Snapshot.Config.Queue.RetryNetworkErrors
+                        var retry = result.Kind is ProbeKind.Busy or ProbeKind.Transient or ProbeKind.Protocol || result.Kind == ProbeKind.Network && active.Snapshot.Config.Queue.RetryNetworkErrors
                             || result.Kind == ProbeKind.Timeout && active.Snapshot.Config.Queue.RetryTimeouts;
-                        if (result.Kind is ProbeKind.Permanent or ProbeKind.Protocol || queue && !retry || !queue && result.Kind == ProbeKind.Busy)
+                        // 临时失败保留其他在途线程，任一正式接受事件即算成功。
+                        if (result.Kind == ProbeKind.Permanent || queue && !retry)
                         {
                             await decision.WaitAsync(token);
                             try
                             {
                                 if (winner < 0 && terminal is null)
                                 {
-                                    terminal = result with { Kind = !queue && result.Kind == ProbeKind.Busy ? ProbeKind.Busy : ProbeKind.Permanent };
+                                    terminal = result;
                                     for (var j = 0; j < sources.Count; j++) if (j != index) await sources[j].CancelAsync();
                                 }
                             }
@@ -329,8 +337,12 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
             if (terminal is not null) return terminal;
             if (winner >= 0) return results[winner];
             if (queue || results.All(r => r.Error == "budget_exhausted")) return new ProbeResult(ProbeKind.Lost, Error: "budget_exhausted");
-            return results.FirstOrDefault(r => r.Kind == ProbeKind.Busy)
+            var settings = active.Snapshot.Config.Keepalive;
+            var failed = results.FirstOrDefault(r => r.Kind == ProbeKind.Network && !settings.RetryNetworkErrors
+                    || r.Kind == ProbeKind.Timeout && !settings.RetryTimeouts)
+                ?? results.FirstOrDefault(r => r.Kind == ProbeKind.Busy)
                 ?? results.FirstOrDefault(r => r.Kind != ProbeKind.Lost) ?? new ProbeResult(ProbeKind.Network, Error: "心跳未得到确认");
+            return failed with { RetryAfterSeconds = results.Max(r => r.RetryAfterSeconds) };
         }
         finally { foreach (var source in sources) source.Dispose(); }
     }
@@ -338,7 +350,7 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
     private async Task<bool> RequeueAsync(ActiveRun active, string reason)
     {
         if (!active.Snapshot.Config.AutoRequeue)
-        { await StopWithAsync(active, "paused", $"{reason}；自动重新排队已关闭", "paused"); return false; }
+        { await StopWithAsync(active, "paused", $"{reason}；自动重新排队已关闭"); return false; }
         await ChangeAsync(active, (document, task) =>
         {
             task.Runtime.Phase = "queue"; task.Runtime.Status = "running"; task.Runtime.QueueRound++;
@@ -354,8 +366,9 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
         {
             task.Runtime.Status = status; task.Runtime.PauseReason = reason; task.Runtime.LastError = reason;
             task.Runtime.SessionConfirmed = false;
+            task.Runtime.FailureSince = null; task.Runtime.DropPendingSince = null;
             TaskStore.AddEvent(document, task, clock.Now, notification ?? status, reason);
-            TaskStore.Notify(document, task, clock.Now, notification ?? status, reason);
+            if (notification is not null) TaskStore.Notify(document, task, clock.Now, notification, reason);
         });
     private async Task WaitAsync(ActiveRun active, int? lane, double seconds, CancellationToken token)
     {

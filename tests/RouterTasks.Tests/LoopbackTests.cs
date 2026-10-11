@@ -18,7 +18,7 @@ public sealed class LoopbackTests
         { AllowAutoRedirect = options.AllowAutoRedirect, UseProxy = false, UseCookies = false }) { Timeout = options.RequestTimeout });
 
     [TestMethod]
-    public async Task RealTcpSseRunsQueueHeartbeatRequeueAndCancelsAllConnections()
+    public async Task RealTcpSseKeepsAliveThroughShortBusyResponseAndCancelsAllConnections()
     {
         var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var disconnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -41,7 +41,7 @@ public sealed class LoopbackTests
         });
         await using var f = new Fixture(); UseSockets(f); f.Site.BaseUrl = server.Origin;
         await f.SeedAsync(); await f.Plugin.Engine.ActionAsync("task", "start"); await blocked.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        var task = await f.TaskAsync(); Assert.AreEqual(2, task.Runtime.QueueRound); Assert.AreEqual(1L, task.Runtime.Recoveries);
+        var task = await f.TaskAsync(); Assert.AreEqual(1, task.Runtime.QueueRound); Assert.AreEqual(0L, task.Runtime.Recoveries);
         Assert.AreEqual("keepalive", task.Runtime.Phase); Assert.AreEqual(5L, task.Runtime.TotalAttempts);
         await f.Plugin.Engine.ActionAsync("task", "pause"); await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.AreEqual(0, f.Plugin.Engine.ActiveCount); Assert.AreEqual(5, captures.Count);

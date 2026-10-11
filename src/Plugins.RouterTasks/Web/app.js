@@ -90,7 +90,17 @@
       const check=el('input');check.type='checkbox';check.checked=selected.has(c.id);check.setAttribute('aria-label','选择任务 '+c.name);check.addEventListener('change',()=>{check.checked?selected.add(c.id):selected.delete(c.id);updateSelection();});
       head.append(el('span',protocol==='messages'?'M':'R','protocol-mark'),identity,check);card.append(head);
       const top=el('div',undefined,'task-top'),s=U.status(task);top.append(pill(s.label,s.tone),el('span',U.modes[c.mode],'mode-label'));card.append(top,el('div',c.model,'task-model'));
-      const box=el('div',undefined,'request-box'),total=el('div',undefined,'request-total'),sub=el('div',undefined,'request-sub');total.append(el('strong',String(r.totalAttempts)),el('span','次请求'));for(const text of ['排队 '+r.queueRound+' 轮','心跳 '+r.heartbeats+' 次','恢复 '+r.recoveries+' 次'])sub.append(el('span',text));box.append(el('small','本次运行累计'),total,sub);card.append(box);
+      const key=state.keys.find(k=>k.id===c.keyId),box=el('div',undefined,'request-box'),summary=el('div',undefined,'request-summary');
+      const total=el('div',undefined,'request-total'),sub=el('div',undefined,'request-sub');
+      total.append(el('strong',String(r.totalAttempts)),el('span','次请求'));
+      for(const text of ['排队 '+r.queueRound+' 轮','心跳 '+r.heartbeats+' 次','恢复 '+r.recoveries+' 次'])sub.append(el('span',text));
+      summary.append(el('small','本次运行累计'),total,sub);
+      const quota=el('div',undefined,'quota-summary'),remaining=el('div',undefined,'quota-total');
+      remaining.append(el('strong',key?U.remaining(key):'—'));
+      quota.append(el('small','剩余额度'),remaining,el('div','已用 '+(key?.usedUsd==null?'—':'$'+Number(key.usedUsd).toFixed(2)),'quota-sub'));
+      const queryError=key?.usageError||key?.error;
+      if(queryError){const warning=el('small','查询失败','quota-error');warning.title='查询失败，已有额度读数保留：'+queryError;warning.setAttribute('aria-label',warning.title);quota.append(warning);}
+      box.append(summary,quota);card.append(box);
       const info=el('div',undefined,'task-info');for(const [label,value]of [['下次请求',date(r.nextAttemptAt)],['上次成功',date(r.lastSuccessAt)]]){const item=el('div');item.append(el('small',label),document.createTextNode(value));info.append(item);}card.append(info);
       const http=el('div',undefined,'task-http');http.append(el('strong',r.lastHttpStatus?'HTTP '+r.lastHttpStatus:'等待请求'),el('span',r.matchedRule==='SSE accepted'?'SSE 已接受':r.matchedRule||'无匹配规则'));card.append(http);
       card.append(el('div','自动重排 '+(c.autoRequeue?'已开启':'已关闭'),'mode-label'));if(r.pauseReason||r.lastError)card.append(el('p',r.pauseReason||r.lastError,'task-error'));
@@ -101,7 +111,7 @@
       actions.append(edit,button(running?'暂停任务':completed?'重新开始':'继续任务',()=>taskAction([c.id],running?'pause':completed?'restart':'resume'),'run'),logs);
       const more=el('details',undefined,'task-more');more.dataset.id=c.id+':menu';more.open=open.has(more.dataset.id);more.append(el('summary','更多'));const menu=el('div',undefined,'menu-list');
       const add=(label,work,disabled=false,cls='')=>{const b=button(label,async()=>{more.open=false;await work();},cls);b.disabled=disabled;menu.append(b);};
-      add('复制账号',()=>openTask(c.id,true));add('查询模型 / 额度',async()=>{await post('keys/refresh',{id:c.keyId});await refresh();await openDetail(c.id);});add('导出账号',()=>exportAccount(c.id));add('立即重试',()=>taskAction([c.id],'retry'),completed);add('手动重排',()=>taskAction([c.id],'requeue'),completed);if(!completed)add('重新开始',()=>taskAction([c.id],'restart'));add('取消任务',()=>taskAction([c.id],'cancel'),!running);add('删除账号',async()=>{if(await ask('删除此账号及其任务、日志和通知配置？')){await post('accounts/delete',{id:c.id});selected.delete(c.id);await refresh();}},running,'danger');more.append(menu);actions.append(more);card.append(actions);$('taskList').append(card);
+      add('复制账号',()=>openTask(c.id,true));add('查询模型 / 额度',async()=>{await post('keys/refresh',{id:c.keyId});await refresh();const updated=state.keys.find(k=>k.id===c.keyId),error=updated?.error||updated?.usageError;notice(error||'模型 / 额度已更新',Boolean(error));});add('导出账号',()=>exportAccount(c.id));add('立即重试',()=>taskAction([c.id],'retry'),completed);add('手动重排',()=>taskAction([c.id],'requeue'),completed);if(!completed)add('重新开始',()=>taskAction([c.id],'restart'));add('取消任务',()=>taskAction([c.id],'cancel'),!running);add('删除账号',async()=>{if(await ask('删除此账号及其任务、日志和通知配置？')){await post('accounts/delete',{id:c.id});selected.delete(c.id);await refresh();}},running,'danger');more.append(menu);actions.append(more);card.append(actions);$('taskList').append(card);
     }
     $('taskPage').textContent=(taskPage+1)+' / '+Math.max(1,Math.ceil(tasks.length/50))+' · '+tasks.length+' 个账号';
     $('previousTasks').disabled=taskPage===0;$('nextTasks').disabled=(taskPage+1)*50>=tasks.length;
@@ -174,7 +184,7 @@
     f.q_maxAttemptsPerLane.disabled=f.unlimitedAttempts.checked;f.q_maxAttemptsPerLane.required=!f.unlimitedAttempts.checked;
     $('modeHelp').textContent=mode==='queue'?'进入成功后完成任务。':
       (mode==='keepalive'?'立即开始心跳。':'先排队，成功后持续保活。')+
-      (f.autoRequeue.checked?'遇到排队状态时自动重排。':'遇到排队状态或确认掉线后暂停。');
+      (f.autoRequeue.checked?'持续失败并确认掉线后自动重排，短暂波动只重试。':'确认掉线后暂停；短暂波动继续重试，尚未进入时等待首次成功。');
   }
   function readTask(){
     const f=fields($('taskForm')),config=U.copy(taskDraft);
@@ -228,10 +238,6 @@
     const metrics=el('div',undefined,'metrics detail-metrics');
     metrics.append(metric('累计请求',r.totalAttempts,'send'),metric('首次进入',r.entered?1:0,'queue'),
       metric('恢复次数',r.recoveries,'layers'),metric('成功心跳',r.heartbeats,'pulse'));content.append(metrics);
-    const key=state.keys.find(k=>k.id===task.config.keyId);
-    if(key){content.append(el('h3','模型与额度'),el('p','已用 '+(key.usedUsd==null?'—':'$'+Number(key.usedUsd).toFixed(2))+' / 剩余 '+U.remaining(key),'subtle'));
-      if(key.models?.length)content.append(el('p',key.models.join('、'),'subtle'));
-      if(key.error||key.usageError)content.append(el('p',key.error||key.usageError,'task-error'));}
     if(r.pauseReason||r.lastError)content.append(el('p',r.pauseReason||r.lastError,'task-error'));
     if(task.stats?.length){
       content.append(el('h3','每日统计'));const wrap=el('div',undefined,'table-scroll'),table=el('table'),head=el('tr');

@@ -49,10 +49,18 @@ public sealed class ProtocolTests
     }
     [TestMethod]
     [DataRow(500, "Busy")]
-    [DataRow(503, "Permanent")]
-    [DataRow(429, "Permanent")]
+    [DataRow(408, "Transient")]
+    [DataRow(425, "Transient")]
+    [DataRow(429, "Transient")]
+    [DataRow(502, "Transient")]
+    [DataRow(503, "Transient")]
+    [DataRow(504, "Transient")]
+    [DataRow(400, "Permanent")]
     [DataRow(401, "Permanent")]
-    public async Task OnlyConfiguredHttpCodesQueue(int status, string expected)
+    [DataRow(402, "Permanent")]
+    [DataRow(403, "Permanent")]
+    [DataRow(404, "Permanent")]
+    public async Task ConfiguredQueueCodesAndTransientHttpFailuresAreDistinct(int status, string expected)
     {
         await using var f = new Fixture(handler: (_, _) => Task.FromResult(Fixture.Response(status, "service error", "text/plain")));
         await f.SeedAsync(); var run = await f.Plugin.ResolveAsync(f.Config, default);
@@ -69,7 +77,7 @@ public sealed class ProtocolTests
         var probe = new HttpProbeClient(f.Http.Object, f.Clock);
         Assert.AreEqual(ProbeKind.Busy, (await probe.ProbeAsync(run, false, "P", _ => Task.FromResult(true), default)).Kind);
         run.Config.QueueHttpStatuses = [500];
-        Assert.AreEqual(ProbeKind.Permanent, (await probe.ProbeAsync(run, false, "P", _ => Task.FromResult(true), default)).Kind);
+        Assert.AreEqual(ProbeKind.Transient, (await probe.ProbeAsync(run, false, "P", _ => Task.FromResult(true), default)).Kind);
         run.Config.QueueHttpStatuses = [503]; body = "insufficient_quota · TOKEN-secret-test-only";
         var result = await probe.ProbeAsync(run, false, "P", _ => Task.FromResult(true), default);
         Assert.AreEqual(ProbeKind.Permanent, result.Kind); StringAssert.Contains(result.Error!, "TOKEN-secret-test-only");

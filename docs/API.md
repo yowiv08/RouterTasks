@@ -106,13 +106,20 @@
 - `claude1MContext`：Claude 1M 上下文开关，默认 `true`；仅影响 Messages 请求。关闭时移除 1M 上下文标记。
 - `queueHttpStatuses`：状态码数组；`null` 使用站点规则。
 - `queue`、`keepalive`：排队与保活阶段参数。
+- `keepalive.idleEvictionSeconds`：距最近一次正式接受事件达到此时长后，在失败结果上开始观察，默认 300 秒。仅适用于已确认的会话。
+- `keepalive.dropConfirmSeconds`：从实际开始观察起持续失败的确认时长，默认 120 秒；0 表示不额外等待。在确认前收到正式接受事件，清除观察且不产生掉线/恢复通知。
 - `requestOverride`：账号专用请求模板。
 - `settings`：账号独立通知与日志设置。
 - `notificationEvents`：`entered`、`dropped`、`recovered`、`stopped`、`paused`、`exhausted`。
 - `runtime.status`：`running`、`recovering`、`paused`、`completed`、`failed`、`exhausted`、`cancelled`。
 - `runtime.phase`：`queue` 或 `keepalive`。
 - `runtime.sessionConfirmed`：本次运行已确认接受事件。
+- `runtime.dropPendingSince`：掉线观察开始时间；未观察、已停止或已成功恢复时为 `null`。
+- `runtime.outageNotified`：本次故障已确认的逻辑标记，不表示外部渠道已投递成功；只有此标记对应的故障恢复才产生 `recovered`。继续/手动重排保留已确认故障，显式重新开始重置。
+- `runtime.outageSequence`：已确认故障编号，不因短暂失败递增；掉线及恢复通知按运行编号、故障编号和渠道去重。
 - `runtime.totalAttempts`：累计请求尝试次数。
+
+`entered` 仅本次运行首次接受时产生；短暂失败与恢复、普通排队、人工暂停/取消只记录事件。确认掉线且关闭自动重排时，`dropped` 与 `paused` 合并通知（优先 `dropped`）。关闭网络/超时重试导致的停止使用 `paused`，不可重试错误使用 `stopped`，阶段全部次数预算耗尽使用 `exhausted`。HTTP 408/425/429/5xx 和非永久的协议失败按阶段参数重试。
 
 ## 配置接口
 

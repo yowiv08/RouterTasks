@@ -6,7 +6,7 @@ using Router.Contracts.Host;
 
 namespace Plugins.RouterTasks;
 
-internal enum ProbeKind { Accepted, Busy, Network, Timeout, Permanent, Protocol, Lost }
+internal enum ProbeKind { Accepted, Busy, Network, Timeout, Permanent, Protocol, Lost, Transient }
 internal sealed record ProbeResult(ProbeKind Kind, int? Status = null, string? Error = null,
     double RetryAfterSeconds = 0, string Summary = "", bool Completed = false);
 internal interface IProbeClient
@@ -18,7 +18,7 @@ internal interface IProbeClient
 /// <summary>管理型探针，不进入模型路由 attempt；独立 HTTP 客户端不隐式重试 POST。</summary>
 internal sealed partial class HttpProbeClient(IPluginHttpServices http, IRuntimeClock clock) : IProbeClient
 {
-    [GeneratedRegex(@"(?i)insufficient_quota|quota exceeded|insufficient credit|credit balance|billing limit|额度不足|配额不足|余额不足|invalid[ _](?:token|api[ _]key)|authentication_error|permission_error|unauthorized|令牌无效|无效的令牌|model_not_found", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?i)insufficient_quota|quota[ _]exceeded|insufficient[ _]credit|credit[ _]balance|billing[ _]limit|billing_hard_limit_reached|额度不足|配额不足|余额不足|invalid[ _](?:token|api[ _]key)|authentication_error|permission_error|unauthorized|令牌无效|无效的令牌|model_not_found", RegexOptions.CultureInvariant)]
     private static partial Regex FatalError();
 
     public static bool IsPermanent(int status, string text) => status is 401 or 402 or 403 || FatalError().IsMatch(text);
@@ -60,7 +60,9 @@ internal sealed partial class HttpProbeClient(IPluginHttpServices http, IRuntime
                 var clean = TextOutput.Summary($"HTTP {status} · {text}");
                 if (IsPermanent(status.Value, text)) return new ProbeResult(ProbeKind.Permanent, status, clean);
                 var codes = run.Config.QueueHttpStatuses ?? run.Site.QueueHttpStatuses;
-                return new ProbeResult(codes.Contains(status.Value) ? ProbeKind.Busy : ProbeKind.Permanent, status, clean, retry);
+                var kind = codes.Contains(status.Value) ? ProbeKind.Busy
+                    : status.Value is 408 or 425 or 429 or >= 500 ? ProbeKind.Transient : ProbeKind.Permanent;
+                return new ProbeResult(kind, status, clean, retry);
             }
             if ((run.Config.QueueHttpStatuses ?? run.Site.QueueHttpStatuses).Contains(status.Value))
                 return new ProbeResult(ProbeKind.Busy, status, $"HTTP {status} 命中配置的排队规则", retry);

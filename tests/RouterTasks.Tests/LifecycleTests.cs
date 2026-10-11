@@ -44,18 +44,27 @@ public sealed class LifecycleTests
         Assert.AreEqual(2, probe.Calls); Assert.AreEqual(0, (await f.TaskAsync()).Runtime.QueueRound);
     }
     [TestMethod]
-    public async Task BusyHeartbeatCancelsItsBlockedPeerImmediately()
+    public async Task BusyHeartbeatPreservesAnAcceptingPeer()
     {
         var allStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSuccess = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var probe = new ScriptProbe(async (n, _, token) =>
         {
-            if (n == 2) { allStarted.TrySetResult(); return await ScriptProbe.Block(token); }
+            if (n == 2)
+            {
+                allStarted.TrySetResult(); await releaseSuccess.Task.WaitAsync(token);
+                return new ProbeResult(ProbeKind.Accepted, 200);
+            }
             await allStarted.Task.WaitAsync(token); return new ProbeResult(ProbeKind.Busy, 500);
         });
         await using var f = new Fixture(probe); f.Config.Mode = "keepalive"; f.Config.AutoRequeue = false; f.Config.Keepalive.Concurrency = 2;
+        f.Config.Keepalive.MaxAttemptsPerLane = 1;
         await f.SeedAsync(); await f.Plugin.Engine.ActionAsync("task", "start");
+        await Fixture.Until(async () => (await f.TaskAsync()).Events.Any(e => e.Kind == "request-failed"));
+        Assert.AreEqual(1, f.Plugin.Engine.ActiveCount); releaseSuccess.SetResult();
         await Fixture.Until(() => Task.FromResult(f.Plugin.Engine.ActiveCount == 0));
-        Assert.AreEqual(2, probe.Calls); Assert.AreEqual("paused", (await f.TaskAsync()).Runtime.Status);
+        Assert.AreEqual(2, probe.Calls); Assert.IsTrue((await f.TaskAsync()).Runtime.Entered);
+        Assert.AreEqual(0L, (await f.TaskAsync()).Runtime.Recoveries);
     }
 
     [TestMethod]
@@ -77,7 +86,7 @@ public sealed class LifecycleTests
     }
 
     [TestMethod]
-    public async Task MultipleTransientRecoveriesInOneQueueRoundNotifySeparately()
+    public async Task MultipleTransientRecoveriesOnlyRecordLogs()
     {
         var probe = new ScriptProbe((n, _, token) => n <= 5
             ? Task.FromResult(new ProbeResult(n % 2 == 1 ? ProbeKind.Accepted : ProbeKind.Network, n % 2 == 1 ? 200 : null)) : ScriptProbe.Block(token));
@@ -85,8 +94,9 @@ public sealed class LifecycleTests
         await f.SeedAsync(); await f.Plugin.Store.UpdateAsync(d => { d.Settings.TelegramEnabled = true; return true; });
         await f.Plugin.Engine.ActionAsync("task", "start"); await Fixture.Until(() => Task.FromResult(probe.Calls == 6));
         var doc = await f.Plugin.Store.ReadAsync(); var task = doc.Tasks.Single();
-        Assert.AreEqual(0, task.Runtime.QueueRound); Assert.AreEqual(2L, task.Runtime.Recoveries);
-        Assert.HasCount(2, doc.Notifications); Assert.AreNotEqual(doc.Notifications[0].Id, doc.Notifications[1].Id);
+        Assert.AreEqual(0, task.Runtime.QueueRound); Assert.AreEqual(0L, task.Runtime.Recoveries);
+        Assert.AreEqual(0L, task.Runtime.OutageSequence); Assert.HasCount(0, doc.Notifications);
+        Assert.HasCount(2, task.Events.Where(e => e.Kind == "heartbeat-resumed").ToArray());
     }
 
     [TestMethod]

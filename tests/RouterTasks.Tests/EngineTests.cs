@@ -9,44 +9,53 @@ public sealed class EngineTests
     [TestMethod]
     public async Task HybridQueuesThenKeepsAliveAndRequeuesWithFreshBudget()
     {
-        var probe = new ScriptProbe((n, _, token) => n switch
+        Fixture? owner = null;
+        var probe = new ScriptProbe((n, _, token) =>
         {
-            1 => Task.FromResult(new ProbeResult(ProbeKind.Busy, 500, "HTTP 500")),
-            2 => Task.FromResult(new ProbeResult(ProbeKind.Accepted, 200)),
-            3 => Task.FromResult(new ProbeResult(ProbeKind.Busy, 500, "HTTP 500")),
-            4 => Task.FromResult(new ProbeResult(ProbeKind.Accepted, 200)),
-            _ => ScriptProbe.Block(token)
+            if (n == 3) owner!.Clock.Advance(180);
+            if (n == 4) owner!.Clock.Advance(105);
+            return n switch
+            {
+                1 or 3 or 4 => Task.FromResult(new ProbeResult(ProbeKind.Busy, 500, "HTTP 500")),
+                2 or 5 => Task.FromResult(new ProbeResult(ProbeKind.Accepted, 200)),
+                _ => ScriptProbe.Block(token)
+            };
         });
-        await using var fixture = new Fixture(probe); fixture.Config.Queue.MaxAttemptsPerLane = 2;
+        await using var fixture = owner = new Fixture(probe); fixture.Config.Queue.MaxAttemptsPerLane = 2;
         await fixture.SeedAsync(); await fixture.Plugin.Engine.ActionAsync("task", "start");
-        await Fixture.Until(async () => (await fixture.TaskAsync()).Runtime.Recoveries == 1 && probe.Calls >= 5);
+        await Fixture.Until(async () => (await fixture.TaskAsync()).Runtime.Recoveries == 1 && probe.Calls >= 6);
         var task = await fixture.TaskAsync();
-        CollectionAssert.AreEqual(new[] { false, false, true, false, true }, probe.Phases.Take(5).ToArray());
-        Assert.AreEqual(2, task.Runtime.QueueRound); Assert.IsGreaterThanOrEqualTo(5L, task.Runtime.TotalAttempts);
+        CollectionAssert.AreEqual(new[] { false, false, true, true, false, true }, probe.Phases.Take(6).ToArray());
+        Assert.AreEqual(2, task.Runtime.QueueRound); Assert.IsGreaterThanOrEqualTo(6L, task.Runtime.TotalAttempts);
         Assert.AreEqual("keepalive", task.Runtime.Phase); Assert.AreNotEqual("completed", task.Runtime.Status);
         await fixture.Plugin.Engine.ActionAsync("task", "pause"); Assert.AreEqual(0, fixture.Plugin.Engine.ActiveCount);
     }
 
     [TestMethod]
-    public async Task KeepaliveStartsWithHeartbeatAndDisabledRequeuePausesWithoutAnotherRequest()
+    public async Task UnconfirmedKeepaliveWaitsWithoutDropNotification()
     {
         var probe = new ScriptProbe((_, _, _) => Task.FromResult(new ProbeResult(ProbeKind.Busy, 500, "HTTP 500")));
         await using var fixture = new Fixture(probe); fixture.Config.Mode = "keepalive"; fixture.Config.AutoRequeue = false;
-        await fixture.SeedAsync(); await fixture.Plugin.Engine.ActionAsync("task", "start");
+        fixture.Config.Keepalive.MaxAttemptsPerLane = 2; fixture.Config.NotificationEvents = ["dropped", "paused", "recovered"];
+        await fixture.SeedAsync();
+        await fixture.Plugin.Store.UpdateAsync(d => { d.Settings.TelegramEnabled = true; return true; });
+        await fixture.Plugin.Engine.ActionAsync("task", "start");
         await Fixture.Until(() => Task.FromResult(fixture.Plugin.Engine.ActiveCount == 0));
-        var task = await fixture.TaskAsync(); Assert.AreEqual("paused", task.Runtime.Status); Assert.IsFalse(task.Runtime.Entered);
-        Assert.AreEqual(1, probe.Calls); Assert.IsTrue(probe.Phases.Single()); StringAssert.Contains(task.Runtime.PauseReason!, "已关闭");
+        var task = await fixture.TaskAsync(); Assert.AreEqual("exhausted", task.Runtime.Status); Assert.IsFalse(task.Runtime.Entered);
+        Assert.AreEqual(2, probe.Calls); Assert.IsTrue(probe.Phases.All(heartbeat => heartbeat));
+        Assert.HasCount(0, (await fixture.Plugin.Store.ReadAsync()).Notifications);
     }
 
     [TestMethod]
     public async Task ManualRequeueWorksWithAutomaticSwitchOff()
     {
         var probe = new ScriptProbe((n, _, token) => n switch { 1 => Task.FromResult(new ProbeResult(ProbeKind.Busy, 500)),
-            2 => Task.FromResult(new ProbeResult(ProbeKind.Accepted, 200)), _ => ScriptProbe.Block(token) });
+            3 => Task.FromResult(new ProbeResult(ProbeKind.Accepted, 200)), _ => ScriptProbe.Block(token) });
         await using var f = new Fixture(probe); f.Config.Mode = "keepalive"; f.Config.AutoRequeue = false;
-        await f.SeedAsync(); await f.Plugin.Engine.ActionAsync("task", "start"); await Fixture.Until(() => Task.FromResult(f.Plugin.Engine.ActiveCount == 0));
-        await f.Plugin.Engine.ActionAsync("task", "requeue"); await Fixture.Until(() => Task.FromResult(probe.Calls >= 3));
-        CollectionAssert.AreEqual(new[] { true, false, true }, probe.Phases.Take(3).ToArray());
+        await f.SeedAsync(); await f.Plugin.Engine.ActionAsync("task", "start"); await Fixture.Until(() => Task.FromResult(probe.Calls == 2));
+        await f.Plugin.Engine.ActionAsync("task", "pause");
+        await f.Plugin.Engine.ActionAsync("task", "requeue"); await Fixture.Until(() => Task.FromResult(probe.Calls >= 4));
+        CollectionAssert.AreEqual(new[] { true, true, false, true }, probe.Phases.Take(4).ToArray());
     }
 
     [TestMethod]
@@ -80,11 +89,12 @@ public sealed class EngineTests
             if (n == 1) return Task.FromResult(new ProbeResult(ProbeKind.Accepted, 200));
             if (n == 2) return Task.FromResult(new ProbeResult(ProbeKind.Network, Error: "short interruption"));
             if (n == 3) { f!.Clock.Advance(500); return Task.FromResult(new ProbeResult(ProbeKind.Timeout)); }
+            if (n == 4) { f!.Clock.Advance(120); return Task.FromResult(new ProbeResult(ProbeKind.Network)); }
             return ScriptProbe.Block(token);
         });
         await using var fixture = f = new Fixture(probe); f.Config.Mode = "keepalive";
-        await f.SeedAsync(); await f.Plugin.Engine.ActionAsync("task", "start"); await Fixture.Until(() => Task.FromResult(probe.Calls >= 4));
-        CollectionAssert.AreEqual(new[] { true, true, true, false }, probe.Phases.Take(4).ToArray());
+        await f.SeedAsync(); await f.Plugin.Engine.ActionAsync("task", "start"); await Fixture.Until(() => Task.FromResult(probe.Calls >= 5));
+        CollectionAssert.AreEqual(new[] { true, true, true, true, false }, probe.Phases.Take(5).ToArray());
         Assert.HasCount(1, (await f.TaskAsync()).Events.Where(e => e.Kind == "dropped").ToList());
     }
 

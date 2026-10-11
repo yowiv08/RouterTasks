@@ -3,7 +3,7 @@
 <body><div class="workspace">
 <header class="topline">
   <div class="brand"><span class="brand-mark"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h12m-3-3 3 3-3 3M20 17H8m3-3-3 3 3 3M4 14v6m-3-3h6M20 4v6"/></svg></span><strong>RouterTasks</strong><span class="tag">任务工作台</span></div>
-  <div class="connection"><span id="connectionDot"></span><span id="connectionText">正在连接宿主</span><button id="refresh" class="ghost" type="button">↻ 刷新</button><span class="tag">v0.2.8</span></div>
+  <div class="connection"><span id="connectionDot"></span><span id="connectionText">正在连接宿主</span><button id="refresh" class="ghost" type="button">↻ 刷新</button><span class="tag">v0.2.9</span></div>
 </header>
 <section class="hero"><div><span class="eyebrow">ROUTER2API</span><h1>请求排队与持续保活</h1><p>按账号配置请求、保活与通知</p></div><div class="hero-state"><small>正在运行的任务</small><strong id="heroActive">0</strong><small>后台持续执行</small></div></section>
 <nav class="workspace-nav" aria-label="插件导航"><button data-page="tasks" class="active">账号任务</button><button data-page="templates">请求模板</button></nav>
@@ -36,13 +36,13 @@
 <div class="switch-panel"><label class="check"><input name="autoRequeue" type="checkbox">允许自动重新排队</label><p id="modeHelp"></p></div>
 </section>
 <section class="editor-pane" data-editor-pane="queue" role="tabpanel" hidden><h3>排队参数</h3><p class="subtle">每轮独立计算预算，保留累计次数。</p><div id="queueFields" class="form-grid"></div><div class="editor-toggle-row"><label class="check"><input name="unlimitedAttempts" type="checkbox">次数不限</label><label class="check"><input name="q_retryNetworkErrors" type="checkbox">网络错误重试</label><label class="check"><input name="q_retryTimeouts" type="checkbox">超时重试</label></div><label class="check"><input name="q_readFullResponse" type="checkbox">仅排队成功后读取完整响应</label></section>
-<section class="editor-pane" data-editor-pane="keepalive" role="tabpanel" hidden><h3>保活参数</h3><p class="subtle">定时发送心跳，按确认窗口判断掉线。</p><div id="keepaliveFields" class="form-grid"></div><div class="editor-toggle-row"><label class="check"><input name="k_retryNetworkErrors" type="checkbox">网络错误重试</label><label class="check"><input name="k_retryTimeouts" type="checkbox">超时重试</label></div></section>
+<section class="editor-pane" data-editor-pane="keepalive" role="tabpanel" hidden><h3>保活参数</h3><p class="subtle">失联窗口结束后进入观察；观察满掉线确认窗口仍未成功时触发掉线通知。成功会重置计时。</p><div id="keepaliveFields" class="form-grid"></div><div class="editor-toggle-row"><label class="check"><input name="k_retryNetworkErrors" type="checkbox">网络错误重试</label><label class="check"><input name="k_retryTimeouts" type="checkbox">超时重试</label></div></section>
 <section class="editor-pane" data-editor-pane="request" role="tabpanel" hidden><details id="requestEditor" open><summary>请求 JSON</summary><p class="hint">{{TOKEN}} 使用此账号的 API Key。Body.stream 为 true。</p><p class="subtle">接口：<code id="requestEndpoint"></code></p><label>Headers<textarea name="requestHeaders" rows="5" class="code" spellcheck="false"></textarea></label><label>Body<textarea name="requestBody" rows="10" class="code" spellcheck="false"></textarea></label></details></section>
 <section class="editor-pane" data-editor-pane="notify" role="tabpanel" hidden>
 <h3>账号通知</h3><p class="subtle">通知从宿主直接发送。</p>
 <fieldset><legend>Telegram</legend><label class="check"><input name="telegramEnabled" type="checkbox">启用此账号的 Telegram 通知</label><label>Bot Token<input name="telegramToken" type="text" autocomplete="off" spellcheck="false"></label><label>Chat ID<input name="telegramChatId" type="text" autocomplete="off"></label></fieldset>
 <fieldset><legend>Bark</legend><label class="check"><input name="barkEnabled" type="checkbox">启用此账号的 Bark 通知</label><div class="form-grid"><label>服务地址<input name="barkServer" type="url" required></label><label>设备 Key<input name="barkKey" type="text" autocomplete="off" spellcheck="false"></label></div></fieldset>
-<fieldset><legend>通知事件</legend><div id="taskNotificationEvents" class="form-grid"></div></fieldset>
+<fieldset><legend>通知事件</legend><p class="subtle">按所选事件推送。首次进入、每次确认掉线及恢复各通知一次；确认掉线且关闭自动重排时，掉线与自动暂停合并通知。</p><div id="taskNotificationEvents" class="form-grid"></div></fieldset>
 <fieldset><legend>通知重试</legend><div class="form-grid"><label>最多投递次数<input name="notificationMaxAttempts" type="number" min="1" max="1000" required></label><label>初始重试间隔（秒）<input name="notificationRetrySeconds" type="number" min="0.001" step="any" required></label><label>最大退避间隔（秒）<input name="notificationMaxRetrySeconds" type="number" min="0.001" step="any" required></label></div></fieldset>
 <fieldset><legend>日志保留</legend><div class="form-grid"><label>事件记录上限<input name="maxEventsPerTask" type="number" min="1" max="10000" required></label><label>响应摘要字节数<input name="summaryBytes" type="number" min="1" max="2097152" required></label><label>通知保留天数<input name="historyDays" type="number" min="1" max="3650" required></label><label>通知记录上限<input name="maxNotificationRecords" type="number" min="1" max="100000" required></label></div></fieldset>
 </section>
@@ -55,5 +55,5 @@
 <dialog id="previewDialog" class="wide"><div class="dialog-heading"><h2>请求预览</h2><button class="ghost" data-close="previewDialog" aria-label="关闭">✕</button></div><pre id="previewContent"></pre></dialog>
 <dialog id="exportDialog" class="wide compact-dialog"><div class="dialog-heading"><h2>账号配置</h2><button class="ghost" data-close="exportDialog" aria-label="关闭">✕</button></div><label class="compact-editor">账号 JSON<textarea id="exportText" class="code" rows="12" readonly spellcheck="false"></textarea></label><div class="form-actions"><button id="selectExport" class="secondary">全选 JSON</button><button class="primary" data-close="exportDialog">完成</button></div></dialog>
 <dialog id="confirmDialog" aria-labelledby="confirmTitle"><h2 id="confirmTitle">确认操作</h2><p id="confirmText"></p><div class="form-actions"><button id="confirmNo" type="button" class="secondary">返回</button><button id="confirmYes" type="button" class="primary">确认</button></div></dialog>
-<footer class="footer"><span>RouterTasks · 请求排队与持续保活</span><span>v0.2.8</span></footer>
+<footer class="footer"><span>RouterTasks · 请求排队与持续保活</span><span>v0.2.9</span></footer>
 </div><script>/*__CORE__*/</script><script>/*__SCRIPT__*/</script></body></html>

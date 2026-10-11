@@ -92,6 +92,28 @@ public sealed class NotificationTests
     }
 
     [TestMethod]
+    public async Task FirstEntryAndOutageIdentityAreIndependentOfQueueRounds()
+    {
+        await using var f = new Fixture(); await f.SeedAsync();
+        await f.Plugin.Store.UpdateAsync(d =>
+        {
+            d.Settings.TelegramEnabled = true;
+            var task = d.Tasks[0]; task.Config.NotificationEvents = ["entered", "dropped", "recovered"];
+            task.Runtime.OutageSequence = 1;
+            foreach (var kind in task.Config.NotificationEvents) TaskStore.Notify(d, task, f.Clock.Now, kind, kind);
+            task.Runtime.QueueRound++;
+            foreach (var kind in task.Config.NotificationEvents) TaskStore.Notify(d, task, f.Clock.Now, kind, kind);
+            task.Runtime.OutageSequence++;
+            foreach (var kind in task.Config.NotificationEvents) TaskStore.Notify(d, task, f.Clock.Now, kind, kind);
+            return true;
+        });
+        var notices = (await f.Plugin.Store.ReadAsync()).Notifications;
+        Assert.HasCount(1, notices.Where(n => n.Kind == "entered").ToArray());
+        Assert.HasCount(2, notices.Where(n => n.Kind == "dropped").ToArray());
+        Assert.HasCount(2, notices.Where(n => n.Kind == "recovered").ToArray());
+    }
+
+    [TestMethod]
     public async Task NotificationCredentialCasDoesNotChangeOtherChannel()
     {
         await using var f = new Fixture(); var vault = new CredentialVault(f.Accounts.Object);
