@@ -69,7 +69,8 @@ internal sealed class NotificationService(TaskStore store, CredentialVault vault
                 if (string.IsNullOrEmpty(secret) || string.IsNullOrEmpty(chat)) throw new FormatException("Telegram 凭据不完整");
                 request.Method = HttpMethod.Post;
                 request.RequestUri = new Uri("https://api.telegram.org/bot" + Uri.EscapeDataString(secret) + "/sendMessage");
-                request.Content = JsonContent.Create(new { chat_id = chat, text = item.Title + "\n" + item.Message });
+                // 默认 JSON 元数据缓存会持有匿名插件类型，导致发送过通知的旧代际无法卸载。
+                request.Content = JsonContent.Create(new { chat_id = chat, text = item.Title + "\n" + item.Message }, options: JsonData.Options);
             }
             else
             {

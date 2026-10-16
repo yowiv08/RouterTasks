@@ -27,15 +27,19 @@ function Test-Inside([string]$Parent, [string]$Child) {
     )
 }
 
-if ($Tag -and $Tag -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
-    throw 'Tag 必须使用 v0.1.0 格式。'
+if ($Tag -and $Tag -cnotmatch '^v[0-9]+\.[0-9]+(?:\.[0-9]+)?$') {
+    throw 'Tag 必须使用 v0.3 或 v0.3.1 格式。'
 }
 
 $root = [IO.Path]::GetFullPath($PSScriptRoot)
 $projectVersion = ([xml](Get-Content -LiteralPath (Join-Path $root 'src/Plugins.RouterTasks/Plugins.RouterTasks.csproj') -Raw)).Project.PropertyGroup.Version
 if ($projectVersion -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw '项目版本必须使用 0.1.0 格式。' }
-if (-not $Tag) { $Tag = "v$projectVersion" }
-if ($Tag -cne "v$projectVersion") { throw "Release tag $Tag 与项目版本 v$projectVersion 不一致。" }
+$versionTags = @("v$projectVersion")
+if (([version]$projectVersion).Build -eq 0) {
+    $versionTags = @("v$(([version]$projectVersion).ToString(2))") + $versionTags
+}
+if (-not $Tag) { $Tag = $versionTags[0] }
+if ($Tag -cnotin $versionTags) { throw "Release tag $Tag 与项目版本 v$projectVersion 不一致。" }
 $npm = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
 $npmLock = Get-Content -LiteralPath (Join-Path $root 'package-lock.json') -Raw | ConvertFrom-Json -AsHashtable
 if ($npm.version -cne $projectVersion -or $npmLock.version -cne $projectVersion -or $npmLock.packages[''].version -cne $projectVersion) {
@@ -74,9 +78,8 @@ if ($manifest.id -cne 'router-tasks' -or $manifest.runtime -cne 'dotnet' -or
     throw '插件元数据无效。'
 }
 $normalizedVersion = ([version]$assemblyVersion).ToString(3)
-if (-not $Tag) { $Tag = "v$normalizedVersion" }
-if ($Tag -cne "v$normalizedVersion") {
-    throw "Release tag $Tag 与插件版本 v$normalizedVersion 不一致。"
+if ($normalizedVersion -cne $projectVersion) {
+    throw "插件版本 v$normalizedVersion 与项目版本 v$projectVersion 不一致。"
 }
 
 $files = @{}

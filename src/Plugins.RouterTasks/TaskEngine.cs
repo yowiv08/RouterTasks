@@ -56,7 +56,7 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
             await store.UpdateAsync(document =>
             {
                 var task = TaskStore.Find(document, id);
-                if (action == "restart") task.Runtime = new TaskRuntime();
+                if (action == "restart") task.Runtime = TaskStore.CreateRuntime(task.Config.Mode, clock.Now);
                 var runtime = task.Runtime;
                 if (runtime.StartedAt is null)
                 {

@@ -105,19 +105,35 @@
       const http=el('div',undefined,'task-http');http.append(el('strong',r.lastHttpStatus?'HTTP '+r.lastHttpStatus:'等待请求'),el('span',r.matchedRule==='SSE accepted'?'SSE 已接受':r.matchedRule||'无匹配规则'));card.append(http);
       card.append(el('div','自动重排 '+(c.autoRequeue?'已开启':'已关闭'),'mode-label'));if(r.pauseReason||r.lastError)card.append(el('p',r.pauseReason||r.lastError,'task-error'));
       if(task.totalLanes>1){const details=el('details',undefined,'lane-details');details.dataset.id=c.id+':lanes';details.open=open.has(details.dataset.id);details.append(el('summary','子线程 '+task.totalLanes+' 个'));for(const lane of r.lanes)details.append(el('p','#'+lane.index+' · '+lane.status+' · '+lane.attempts+' 次 · '+(lane.lastError||date(lane.nextAttemptAt)),'subtle'));if(task.totalLanes>8)details.append(el('p','更多线程请在详情中查看。','subtle'));card.append(details);}
-      const running=['running','recovering'].includes(r.status),completed=r.status==='completed',actions=el('div',undefined,'card-actions');
+      const available=U.taskActions(task),running=available.action==='pause',actions=el('div',undefined,'card-actions');
       const edit=button('编辑',()=>openTask(c.id),'secondary task-edit');edit.disabled=running;edit.title=running?'请先暂停任务':'编辑账号';
       const logs=button('日志',()=>openDetail(c.id),'secondary task-logs');logs.title='日志统计';
-      actions.append(edit,button(running?'暂停任务':completed?'重新开始':'继续任务',()=>taskAction([c.id],running?'pause':completed?'restart':'resume'),'run'),logs);
+      const run=button(available.label,()=>taskAction([c.id],available.action),'run');if(available.action==='restart')run.title=available.reason+'；重新开始将重置运行计数';
+      actions.append(edit,run,logs);
       const more=el('details',undefined,'task-more');more.dataset.id=c.id+':menu';more.open=open.has(more.dataset.id);more.append(el('summary','更多'));const menu=el('div',undefined,'menu-list');
       const add=(label,work,disabled=false,cls='')=>{const b=button(label,async()=>{more.open=false;await work();},cls);b.disabled=disabled;menu.append(b);};
-      add('复制账号',()=>openTask(c.id,true));add('查询模型 / 额度',async()=>{await post('keys/refresh',{id:c.keyId});await refresh();const updated=state.keys.find(k=>k.id===c.keyId),error=updated?.error||updated?.usageError;notice(error||'模型 / 额度已更新',Boolean(error));});add('导出账号',()=>exportAccount(c.id));add('立即重试',()=>taskAction([c.id],'retry'),completed);add('手动重排',()=>taskAction([c.id],'requeue'),completed);if(!completed)add('重新开始',()=>taskAction([c.id],'restart'));add('取消任务',()=>taskAction([c.id],'cancel'),!running);add('删除账号',async()=>{if(await ask('删除此账号及其任务、日志和通知配置？')){await post('accounts/delete',{id:c.id});selected.delete(c.id);await refresh();}},running,'danger');more.append(menu);actions.append(more);card.append(actions);$('taskList').append(card);
+      add('复制账号',()=>openTask(c.id,true));add('查询模型 / 额度',async()=>{await post('keys/refresh',{id:c.keyId});await refresh();const updated=state.keys.find(k=>k.id===c.keyId),error=updated?.error||updated?.usageError;notice(error||'模型 / 额度已更新',Boolean(error));});add('导出账号',()=>exportAccount(c.id));add('立即重试',()=>taskAction([c.id],'retry'),!available.retry);add('手动重排',()=>taskAction([c.id],'requeue'),!available.requeue);if(available.action!=='restart')add('重新开始',()=>taskAction([c.id],'restart'));add('取消任务',()=>taskAction([c.id],'cancel'),!running);add('删除账号',async()=>{if(await ask('删除此账号及其任务、日志和通知配置？')){await post('accounts/delete',{id:c.id});selected.delete(c.id);await refresh();}},running,'danger');more.append(menu);actions.append(more);card.append(actions);$('taskList').append(card);
     }
     $('taskPage').textContent=(taskPage+1)+' / '+Math.max(1,Math.ceil(tasks.length/50))+' · '+tasks.length+' 个账号';
     $('previousTasks').disabled=taskPage===0;$('nextTasks').disabled=(taskPage+1)*50>=tasks.length;
     updateSelection();
   }
-  async function taskAction(ids,action){if(action==='restart'&&!await ask('重置运行计数并重新开始？'))return;const result=await post('tasks/action',{ids,action});const errors=result.results.filter(r=>!r.success);notice(errors.length?errors.map(e=>e.error).join('；'):'操作已完成',errors.length>0);await refresh();}
+  async function taskAction(ids,action){
+    if(action==='restart'&&!await ask('重置运行计数并重新开始？'))return;
+    const names=new Map(state.tasks.map(task=>[task.config.id,task.config.name])),errors=[];
+    if(action==='resume')ids=ids.filter(id=>{
+      const task=state.tasks.find(task=>task.config.id===id),available=task&&U.taskActions(task);
+      if(available?.action!=='restart')return true;
+      errors.push(names.get(id)+'：'+available.reason+'，请使用“重新开始”');return false;
+    });
+    let completed=0;
+    if(ids.length){
+      const result=await post('tasks/action',{ids,action});
+      for(const item of result.results)if(item.success)completed++;else errors.push((names.get(item.id)||item.id)+'：'+item.error);
+      await refresh();
+    }
+    notice(errors.length?(completed?'已完成 '+completed+' 个账号；':'')+errors.join('；'):'操作已完成',errors.length>0);
+  }
   function renderTemplates(){ $('templateList').replaceChildren();for(const template of state.templates){const card=el('article',undefined,'site-card');card.append(el('h3',template.name),el('p',(template.protocol==='messages'?'Anthropic Messages':'OpenAI Responses')+' · /v1/'+template.protocol),button('编辑完整 JSON',()=>openTemplate(template.id)),button('复制模板',()=>openTemplate(template.id,true),'ghost'));$('templateList').append(card);} }
   function populateModels(){
     const key=state.keys.find(k=>k.id===fields($('taskForm')).keyId.value);

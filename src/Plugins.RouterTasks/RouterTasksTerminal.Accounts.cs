@@ -122,11 +122,10 @@ public sealed partial class RouterTasksTerminal
                 var task = state.Tasks.Find(t => t.Config.Id == config.Id);
                 if (task is null)
                     state.Tasks.Add(new TaskRecord { Config = config, ConfigRevision = 1,
-                        Runtime = new TaskRuntime { Phase = config.Mode == "keepalive" ? "keepalive" : "queue" } });
+                        Runtime = TaskStore.CreateRuntime(config.Mode, _clock.Now) });
                 else
                 {
-                    if (task.Config.Mode != config.Mode) { task.Runtime.Phase = config.Mode == "keepalive" ? "keepalive" : "queue"; task.Runtime.Lanes.Clear(); }
-                    task.Config = config; task.ConfigRevision++;
+                    TaskStore.ApplyConfig(state, task, config, _clock.Now); task.ConfigRevision++;
                 }
                 foreach (var notice in state.Notifications.Where(n => n.TaskId == config.Id && n.State is "queued" or "retrying" or "paused"))
                     notice.ProfileId = profile;

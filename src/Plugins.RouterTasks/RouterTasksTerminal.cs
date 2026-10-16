@@ -15,7 +15,7 @@ namespace Plugins.RouterTasks;
 [ModelCache(Disabled = true)]
 public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModule, IPluginMainPageProvider
 {
-    public const string Version = "0.2.9";
+    public const string Version = "0.3";
     private readonly IPluginServices _host;
     private readonly CredentialVault _vault;
     private readonly SourcePromptService _sources;
@@ -246,13 +246,12 @@ public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModu
             if (task is null)
             {
                 task = new TaskRecord { Config = input.Config, ConfigRevision = 1,
-                    Runtime = new TaskRuntime { Phase = input.Config.Mode == "keepalive" ? "keepalive" : "queue" } }; document.Tasks.Add(task);
+                    Runtime = TaskStore.CreateRuntime(input.Config.Mode, _clock.Now) }; document.Tasks.Add(task);
             }
             else
             {
                 if (input.ExpectedRevision != task.ConfigRevision) throw new ConflictException("任务配置已变化，请重新读取");
-                if (task.Config.Mode != input.Config.Mode) { task.Runtime.Phase = input.Config.Mode == "keepalive" ? "keepalive" : "queue"; task.Runtime.Lanes.Clear(); }
-                task.Config = input.Config; task.ConfigRevision++;
+                TaskStore.ApplyConfig(document, task, input.Config, _clock.Now); task.ConfigRevision++;
             }
             return task;
         }, context.CancellationToken));
@@ -351,11 +350,11 @@ public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModu
                 var old = document.Tasks.Find(t => t.Config.Id == config.Id);
                 if (old is not null)
                 {
-                    if (old.Config.Mode != config.Mode) { old.Runtime.Phase = config.Mode == "keepalive" ? "keepalive" : "queue"; old.Runtime.Lanes.Clear(); }
-                    old.Config = config; old.ConfigRevision++; old.Runtime.Status = "paused"; old.Runtime.Generation = null;
+                    TaskStore.ApplyConfig(document, old, config, _clock.Now); old.ConfigRevision++; old.Runtime.Status = "paused"; old.Runtime.Generation = null;
                     old.Runtime.NextAttemptAt = null; old.Runtime.SessionConfirmed = false; old.Runtime.PauseReason = "导入后暂停；请确认 Key 绑定";
                 }
-                else document.Tasks.Add(new TaskRecord { Config = config, ConfigRevision = 1, Runtime = new TaskRuntime { Phase = config.Mode == "keepalive" ? "keepalive" : "queue", PauseReason = "导入后暂停；请确认 Key 绑定" } });
+                else document.Tasks.Add(new TaskRecord { Config = config, ConfigRevision = 1,
+                    Runtime = TaskStore.CreateRuntime(config.Mode, _clock.Now) with { PauseReason = "导入后暂停；请确认 Key 绑定" } });
             }
             return true;
         }, context.CancellationToken);

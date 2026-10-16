@@ -72,6 +72,19 @@
     if (r.status === 'recovering') return { label: r.outageNotified ? '掉线恢复中' : '掉线观察中', tone: 'warn' };
     return r.phase === 'queue' ? { label: '排队中', tone: 'warn' } : { label: r.sessionConfirmed ? '保活中' : '等待心跳确认', tone: r.sessionConfirmed ? 'ok' : 'warn' };
   }
+  function taskActions(task) {
+    const c = task.config, r = task.runtime, queue = r.phase === 'queue', stage = queue ? c.queue : c.keepalive;
+    // 与引擎一致，按当前阶段和线程编号保留次数；列表只展示前 8 个线程，预算使用完整计数表。
+    const saved = queue ? r.queueLaneAttempts : r.keepaliveLaneAttempts;
+    const attempts = saved && Object.keys(saved).length ? saved : Object.fromEntries((r.lanes || []).map(lane => [lane.index, lane.attempts]));
+    const exhausted = stage.maxAttemptsPerLane != null && Array.from({ length: stage.concurrency }, (_, i) => i + 1)
+      .every(index => (attempts[index] || 0) >= stage.maxAttemptsPerLane);
+    const accepted = c.mode === 'queue' && r.entered && (r.responseState || 'none') !== 'none';
+    const reason = r.status === 'completed' ? '任务已完成' : accepted ? '请求已被接受，无法继续重放' : exhausted ? '当前阶段的次数预算已耗尽' : null;
+    const action = ['running', 'recovering'].includes(r.status) ? 'pause' : reason ? 'restart' : 'resume';
+    return { action, label: { pause: '暂停任务', restart: '重新开始', resume: '继续任务' }[action], reason,
+      retry: !reason && r.responseState !== 'reading', requeue: r.status !== 'completed' && !accepted };
+  }
   function remaining(key) {
     if (key.unlimited) return '无限制';
     if (key.limitUsd == null || key.usedUsd == null) return '—';
@@ -100,6 +113,6 @@
     result.body = stringify(body);
     return result;
   }
-  root.RouterTasksUI = Object.freeze({ copy, modes, eventNames, parseCodes, defaults, status, remaining, jsonObject, setKnownField,
+  root.RouterTasksUI = Object.freeze({ copy, modes, eventNames, parseCodes, defaults, status, taskActions, remaining, jsonObject, setKnownField,
     parseJson, stringify, wireTemplate, displayTemplate, importConfig, importAccount, settingsDefaults });
 })(globalThis);

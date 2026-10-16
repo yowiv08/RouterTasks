@@ -195,6 +195,39 @@ try {
   assert.deepEqual(api.calls.filter(c=>c.path==='accounts/delete').map(c=>c.body.id),[saved.body.config.id]);
   assert.equal(await frame.locator('#selectionCount').innerText(),'已选 0 个');
   checks.push('删除所选在浏览器中取消不删除、确认仅删除选中的模拟账号');
+  const actionTask=data.tasks.find(task=>task.config.id==='task2'),actionCard=frame.locator('.task-card[data-id="task2"]');
+  const taskActions=()=>api.calls.filter(call=>call.path==='tasks/action');
+  async function clickTaskAction(action){
+    const before=taskActions().length;
+    if(action==='restart'){
+      await actionCard.locator('.run').click();await frame.locator('#confirmDialog').waitFor({state:'visible'});
+      assert.equal(taskActions().length,before);await frame.locator('#confirmNo').click();
+      await frame.locator('#confirmDialog').waitFor({state:'hidden'});assert.equal(taskActions().length,before);
+      await actionCard.locator('.run').click();await frame.locator('#confirmDialog').waitFor({state:'visible'});
+    }
+    const response=page.waitForResponse(result=>result.url()===origin+'/api/plugins/router-tasks/tasks/action'&&result.request().method()==='POST');
+    await (action==='restart'?frame.locator('#confirmYes'):actionCard.locator('.run')).click();await response;
+    assert.equal(taskActions().length,before+1);assert.deepEqual(taskActions().at(-1).body,{ids:['task2'],action});
+  }
+  for(const mode of ['queue','keepalive','queue_then_keepalive']){
+    actionTask.config.mode=mode;
+    Object.assign(actionTask.runtime,{status:'paused',phase:mode==='keepalive'?'keepalive':'queue',entered:false,responseState:'none',
+      queueLaneAttempts:{},keepaliveLaneAttempts:{},lanes:[]});
+    await page.reload();await actionCard.getByRole('button',{name:'继续任务',exact:true}).waitFor();await clickTaskAction('resume');
+  }
+  checks.push('三模式暂停后点击继续任务，管理桥实际收到 resume');
+  actionTask.config.mode='queue';Object.assign(actionTask.runtime,{phase:'queue',entered:true,responseState:'interrupted'});
+  await page.reload();await actionCard.getByRole('button',{name:'重新开始',exact:true}).waitFor();await clickTaskAction('restart');
+  checks.push('已接受后中断的仅排队请求显示重新开始，取消不发请求，确认发送 restart');
+  actionTask.config.mode='keepalive';actionTask.config.keepalive.maxAttemptsPerLane=2;
+  Object.assign(actionTask.runtime,{status:'exhausted',phase:'keepalive',keepaliveLaneAttempts:{1:2},totalAttempts:2});
+  await page.reload();await actionCard.getByRole('button',{name:'重新开始',exact:true}).waitFor();
+  await actionCard.locator('.task-edit').click();await frame.locator('#taskDialog').waitFor({state:'visible'});
+  await frame.locator('[data-editor-target=keepalive]').click();await frame.locator('#taskForm [name=k_maxAttemptsPerLane]').fill('3');
+  await frame.locator('#taskForm button[type=submit]').click();await frame.locator('#taskDialog').waitFor({state:'hidden'});
+  await actionCard.getByRole('button',{name:'继续任务',exact:true}).waitFor();await clickTaskAction('resume');
+  assert.equal(data.tasks.find(task=>task.config.id==='task2').runtime.totalAttempts,2);
+  checks.push('保活预算耗尽显示重新开始，编辑增加预算后点击继续发送 resume 并保留已用次数');
   assert.deepEqual(errors,[]);assert.deepEqual(blocked,[]);
   assert.ok(api.calls.some(c=>c.path==='tasks/action'&&c.body.action==='restart'));
   checks.push('浏览器运行无错误');

@@ -64,10 +64,11 @@ if (storageOnly)
     accounts.Setup(a => a.DeleteAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
         .Returns((string id, CancellationToken token) => persistentAccounts.DeleteAsync("router-tasks", id, token));
 }
+Uri? telegramEndpoint = null;
 var http = new Mock<IPluginHttpServices>();
 http.Setup(h => h.ApproveOriginAsync(It.IsAny<string>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
 http.Setup(h => h.CreateDirectClient(It.IsAny<PluginHttpClientOptions>())).Returns((PluginHttpClientOptions options) =>
-    new HttpClient(new LoopbackOnlyHandler(new SocketsHttpHandler { AllowAutoRedirect = options.AllowAutoRedirect, UseProxy = false, UseCookies = false }))
+    new HttpClient(new LoopbackOnlyHandler(new SocketsHttpHandler { AllowAutoRedirect = options.AllowAutoRedirect, UseProxy = false, UseCookies = false }, () => telegramEndpoint))
     { Timeout = options.RequestTimeout });
 var services = new Mock<IPluginServices>();
 services.SetupGet(s => s.PluginKey).Returns("router-tasks"); services.SetupGet(s => s.Accounts).Returns(accounts.Object);
@@ -88,6 +89,24 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = []
 builder.Logging.ClearProviders(); builder.WebHost.UseUrls("http://127.0.0.1:0");
 await using var app = builder.Build();
 var upstreamCalls = 0; var upstreamActive = 0; var upstreamCancelled = 0;
+var notificationDeliveries = new ConcurrentQueue<string>();
+app.MapPost("/notifications/telegram", async (HttpContext context) =>
+{
+    var payload = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+    if (payload?["chat_id"]?.GetValue<string>() != "CHAT-loopback" ||
+        payload["text"]?.GetValue<string>().Contains("首次进入", StringComparison.Ordinal) != true)
+        return Results.BadRequest(new { ok = false });
+    notificationDeliveries.Enqueue("telegram");
+    return Results.Json(new { ok = true });
+});
+app.MapGet("/notifications/bark/{key}/{title}/{message}", (HttpContext context, string key, string title, string message) =>
+{
+    if (key != "BARK-loopback" || !title.Contains("首次进入", StringComparison.Ordinal) ||
+        !message.Contains("发生时间", StringComparison.Ordinal) || context.Request.Query["group"] != "RouterTasks")
+        return Results.BadRequest(new { code = 400 });
+    notificationDeliveries.Enqueue("bark");
+    return Results.Json(new { code = 200 });
+});
 app.MapPost("/upstream/v1/responses", async (HttpContext context) =>
 {
     Interlocked.Increment(ref upstreamActive);
@@ -107,6 +126,7 @@ app.MapPost("/upstream/v1/responses", async (HttpContext context) =>
 catalog.MapEndpoints(app);
 await app.StartAsync();
 var origin = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
+telegramEndpoint = new Uri(origin + "/notifications/telegram");
 using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { BaseAddress = new Uri(origin) };
 var checks = new List<string>();
 var weakContexts = new List<WeakReference>();
@@ -165,6 +185,11 @@ try
         body = "{\"model\":\"{{MODEL}}\",\"input\":\"{{PROMPT}}\",\"stream\":true,\"unknown\":9007199254740993123456789}" });
     await Post("tasks/save", new { config = new { id = "task", name = "Loopback", siteId = "site", keyId = key!["id"]!.GetValue<string>(),
         templateId = "simple", model = "MODEL", mode = "queue_then_keepalive", queue = new { intervalSeconds = .02 }, keepalive = new { heartbeatSeconds = .03 } } });
+    await Post("settings/save", new
+    {
+        settings = new { telegramEnabled = true, barkEnabled = true, barkServer = origin + "/notifications/bark" },
+        secrets = new { telegramToken = "123456789:LOCAL-test-token", telegramChatId = "CHAT-loopback", barkKey = "BARK-loopback" }
+    });
     using (var invalid = await client.PostAsJsonAsync("/api/plugins/router-tasks/sites/save", new { id = "invalid", baseUrl = "invalid" }))
         Check(invalid.StatusCode == HttpStatusCode.BadRequest, "无效配置返回 JSON 错误");
     using (var missing = await client.GetAsync("/api/plugins/router-tasks/tasks/detail?id=missing"))
@@ -176,6 +201,9 @@ try
     var state = await State();
     Check(state["tasks"]![0]!["runtime"]!["phase"]!.GetValue<string>() == "keepalive", "模型请求与三阶段状态");
     Check(!state.ToJsonString().Contains("TOKEN-loopback-only", StringComparison.Ordinal), "管理员状态不返回凭据");
+    await Until(async () => (await State())["notifications"]!.AsArray().Count(n => n!["state"]!.GetValue<string>() == "sent") == 2);
+    Check(notificationDeliveries.Count == 2 && notificationDeliveries.Distinct().Count() == 2,
+        "实际插件首次进入后通过回环 HTTP 投递 Telegram 与 Bark，分别保存成功回执");
     weakContexts.AddRange(Contexts());
     var previous = catalog.Get("router-tasks")!.DirectoryPath;
     await catalog.ReloadAsync("router-tasks");
@@ -184,6 +212,8 @@ try
     Check(catalog.Get("router-tasks")!.DirectoryPath != previous, "热更新更换程序集快照");
     Check(state["activeCount"]!.GetValue<int>() == 0 && state["tasks"]![0]!["runtime"]!["status"]!.GetValue<string>() == "paused", "热更新暂停任务并释放请求");
     Check(state["tasks"]![0]!["runtime"]!["totalAttempts"]!.GetValue<long>() == 3 && !state["tasks"]![0]!["runtime"]!["sessionConfirmed"]!.GetValue<bool>(), "计数保留且历史成功不冒充保活");
+    Check(state["notifications"]!.AsArray().All(n => n!["state"]!.GetValue<string>() == "sent") && notificationDeliveries.Count == 2,
+        "插件重载保留通知回执，不重复发送");
     var reloadGcAttempts = await CollectContextsAsync(weakContexts);
     Check(weakContexts.All(w => !w.IsAlive), "热更新后旧上下文释放，新版本保持加载");
     await Post("tasks/action", new { ids = new[] { "task" }, action = "resume" });
@@ -201,12 +231,13 @@ try
     weakContexts.AddRange(Contexts());
     await catalog.RemovePackageAsync("router-tasks", default);
     Check(catalog.Get("router-tasks") is null && registry.Get("router-tasks") is null, "删除插件注销目录与平台");
-    Check(File.Exists(Path.Combine(dataPath, "state.json")) && accountData.Count == 1, "插件卸载保留独立业务数据与账号");
+    Check(File.Exists(Path.Combine(dataPath, "state.json")) && accountData.Count == 2, "插件卸载保留独立业务数据、账号与通知凭据");
     await app.StopAsync();
     var gcAttempts = await CollectContextsAsync(weakContexts);
     Check(weakContexts.Count == 3, "记录首次加载、热更新和重新启用的三个上下文");
     Check(weakContexts.All(w => !w.IsAlive), "可回收程序集上下文释放");
     await File.WriteAllTextAsync(Path.Combine(root, "host-report.json"), JsonSerializer.Serialize(new { checks, upstreamCalls, upstreamCancelled, upstreamActive,
+        notificationDeliveries = notificationDeliveries.ToArray(),
         unloadContexts = weakContexts.Count, collectedContexts = weakContexts.Count(w => !w.IsAlive), reloadGcAttempts, disableGcAttempts, gcAttempts,
         hostVersion = typeof(PluginCatalog).Assembly.GetName().Version!.ToString() }, new JsonSerializerOptions { WriteIndented = true }));
     Console.WriteLine(JsonSerializer.Serialize(new { passed = checks.Count, upstreamCalls, upstreamCancelled, upstreamActive, report = Path.Combine(root, "host-report.json") }));
@@ -248,10 +279,16 @@ static async Task<int> CollectContextsAsync(IReadOnlyList<WeakReference> context
     return attempts;
 }
 
-internal sealed class LoopbackOnlyHandler(HttpMessageHandler inner) : DelegatingHandler(inner)
+internal sealed class LoopbackOnlyHandler(HttpMessageHandler inner, Func<Uri?> telegramEndpoint) : DelegatingHandler(inner)
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
-        => request.RequestUri?.IsLoopback == true ? base.SendAsync(request, token) : throw new InvalidOperationException("隔离宿主只允许回环 HTTP");
+    {
+        // 只把本验收的虚构 Bot 路由到本地模拟接口，其他非回环请求始终拒绝。
+        if (request.Method == HttpMethod.Post && request.RequestUri is { Scheme: "https", Host: "api.telegram.org" } uri &&
+            Uri.UnescapeDataString(uri.AbsolutePath) == "/bot123456789:LOCAL-test-token/sendMessage")
+            request.RequestUri = telegramEndpoint() ?? throw new InvalidOperationException("本地通知接口尚未启动");
+        return request.RequestUri?.IsLoopback == true ? base.SendAsync(request, token) : throw new InvalidOperationException("隔离宿主只允许回环 HTTP");
+    }
 }
 
 internal sealed record HostSerializationProbe(int Value);

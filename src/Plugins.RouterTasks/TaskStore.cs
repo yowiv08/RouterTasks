@@ -62,6 +62,9 @@ internal sealed class TaskStore(string directory, Func<List<RequestTemplate>> pr
                     || item.Runtime.QueueLaneAttempts is null || item.Runtime.KeepaliveLaneAttempts is null)
                     throw new IOException("任务状态结构无效；未修改原文件");
                 if (item.Config.Settings is { } settings) Validation.Settings(settings);
+                // 旧版本切换模式只改阶段；快照仍属于旧模式时，不能沿用其接受状态和次数预算。
+                if (item.Snapshot?.Config is { } previousConfig)
+                    ResetChangedMode(loaded, item, previousConfig.Mode, clock.Now);
                 if (item.Runtime.Status is "running" or "recovering")
                 {
                     item.Runtime.Status = "paused";
@@ -128,6 +131,23 @@ internal sealed class TaskStore(string directory, Func<List<RequestTemplate>> pr
 
     public static TaskRecord Find(StoreDocument document, string id) => document.Tasks.Find(t => t.Config.Id == id)
         ?? throw new KeyNotFoundException("任务不存在");
+    public static TaskRuntime CreateRuntime(string mode, DateTimeOffset at)
+        => new() { Phase = mode == "keepalive" ? "keepalive" : "queue", UpdatedAt = at };
+    public static void ApplyConfig(StoreDocument document, TaskRecord task, TaskConfig config, DateTimeOffset at)
+    {
+        var previousMode = task.Config.Mode;
+        task.Config = config;
+        ResetChangedMode(document, task, previousMode, at);
+    }
+    private static void ResetChangedMode(StoreDocument document, TaskRecord task, string previousMode, DateTimeOffset at)
+    {
+        if (previousMode == task.Config.Mode) return;
+        task.Runtime = CreateRuntime(task.Config.Mode, at);
+        task.Runtime.PauseReason = "模式已切换；继续任务将开始新的运行";
+        task.Snapshot = null;
+        // 只重建本次运行；事件、每日统计和已记录通知继续保留。
+        AddEvent(document, task, at, "mode-changed", task.Runtime.PauseReason);
+    }
     public static PluginSettings SettingsFor(StoreDocument document, string taskId)
         => document.Tasks.Find(t => t.Config.Id == taskId)?.Config.Settings ?? document.Settings;
     public static void AddEvent(StoreDocument document, TaskRecord task, DateTimeOffset at, string kind, string message, int? lane = null)

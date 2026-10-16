@@ -124,7 +124,8 @@ internal sealed partial class HttpProbeClient(IPluginHttpServices http, IRuntime
         { return didAccept ? Done(false, error.Message) : new ProbeResult(ProbeKind.Timeout, status, TextOutput.Summary(error.Message)); }
         catch (ResponseLimitException error)
         { return didAccept ? Done(false, error.Message) : new ProbeResult(ProbeKind.Protocol, status, error.Message); }
-        catch (Exception error) when (error is DecoderFallbackException or InvalidOperationException)
+        // 尚未收到响应时的客户端/代理配置异常应交给引擎停止，不能当成 SSE 格式错误重试。
+        catch (Exception error) when (error is DecoderFallbackException || error is InvalidOperationException && status is not null)
         { return didAccept ? Done(false, "SSE 数据结构或 UTF-8 无效") : new ProbeResult(ProbeKind.Protocol, status, "SSE 数据结构或 UTF-8 无效"); }
         catch (Exception error) when (error is HttpRequestException or IOException)
         { return didAccept ? Done(false, TextOutput.Summary(error.Message)) : new ProbeResult(ProbeKind.Network, status, TextOutput.Summary(error.Message)); }

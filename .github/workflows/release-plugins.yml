@@ -34,7 +34,7 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
           PUBLISH_RELEASE: ${{ inputs.publish_release }}
         run: |
-          if ($env:RELEASE_TAG -and $env:RELEASE_TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+          if ($env:RELEASE_TAG -and $env:RELEASE_TAG -cnotmatch '^v[0-9]+\.[0-9]+(?:\.[0-9]+)?$') {
             throw "Invalid release tag: $env:RELEASE_TAG"
           }
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and

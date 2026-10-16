@@ -225,7 +225,13 @@ public sealed class AccountTests
         {
             foreach (var task in d.Tasks)
             {
-                for (var i = 0; i < 3; i++) { TaskStore.AddEvent(d, task, f.Clock.Now, "test", i.ToString()); task.Runtime.QueueRound++; TaskStore.Notify(d, task, f.Clock.Now, "entered", "accepted"); }
+                for (var i = 0; i < 3; i++)
+                {
+                    TaskStore.AddEvent(d, task, f.Clock.Now, "test", i.ToString());
+                    // 每次模拟独立运行，避免首次进入通知按 RunId 去重影响保留上限测试。
+                    task.Runtime.RunId = $"run-{task.Config.Id}-{i}";
+                    TaskStore.Notify(d, task, f.Clock.Now, "entered", "accepted");
+                }
                 TaskStore.Count(d, f.Clock.Now, "responses", "entered", task.Config.Id);
             }
             return true;

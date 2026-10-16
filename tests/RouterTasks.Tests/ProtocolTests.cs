@@ -44,6 +44,7 @@ public sealed class ProtocolTests
         f.Http.SetupGet(h => h.Pool).Returns(pool.Object);
         await f.Plugin.Engine.ActionAsync("task", "start"); await Fixture.Until(() => Task.FromResult(f.Plugin.Engine.ActiveCount == 0));
         var task = await f.TaskAsync(); Assert.AreEqual("failed", task.Runtime.Status); Assert.AreEqual(1L, task.Runtime.TotalAttempts);
+        StringAssert.Contains(task.Runtime.LastError!, "代理池没有可用节点");
         f.Http.Verify(h => h.CreateDirectClient(It.IsAny<PluginHttpClientOptions>()), Times.Never);
         pool.Verify(p => p.CreateClientAsync(It.Is<ProxyPoolHttpClientOptions>(o => !o.AllowDirectFallback && !o.AllowAutoRedirect), It.IsAny<CancellationToken>()), Times.Once);
     }

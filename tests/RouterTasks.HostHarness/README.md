@@ -5,6 +5,7 @@
 - 管理会话和 CSRF 校验。
 - 插件页面、参数错误、任务状态和 JSON 数值精度。
 - 排队、保活、取消请求和重载后的暂停状态。
+- 首次进入后 Telegram 与 Bark 的后台投递、成功回执及重载后不重复发送。
 - 热更新后旧程序集回收，同时保留新版本可用性。
 - 禁用和删除后的程序集回收；三个加载上下文分别校验。
 - SQLite 账号服务的 Key、通知凭据、版本冲突和重载持久化。
@@ -19,4 +20,6 @@
 
 运行时缓存实现：[ReflectionEmitCachingMemberAccessor](https://github.com/dotnet/runtime/blob/v10.0.0/src/libraries/System.Text.Json/src/System/Text/Json/Serialization/Metadata/ReflectionEmitCachingMemberAccessor.cs) / [Cache](https://github.com/dotnet/runtime/blob/v10.0.0/src/libraries/System.Text.Json/src/System/Text/Json/Serialization/Metadata/ReflectionEmitCachingMemberAccessor.Cache.cs)。
 
-`host-report.json` 记录请求数、取消数、各阶段 GC 次数和回收的上下文数量。`storage-report.json` 记录 SQLite 持久化结果。任何断言失败返回非零退出码。
+通知验收使用虚构凭据和本机模拟接口。固定的测试 Telegram Bot 路径会映射到回环 HTTP，Bark 使用回环服务地址，其他外部 HTTP 均被拒绝。
+
+`host-report.json` 记录请求数、取消数、通知投递渠道、各阶段 GC 次数和回收的上下文数量。`storage-report.json` 记录 SQLite 持久化结果。任何断言失败返回非零退出码。
