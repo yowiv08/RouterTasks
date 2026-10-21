@@ -4,7 +4,7 @@
   const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
   const id = () => crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, '0')).join('');
   const fields = form => form.elements;
-  const date = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Hong_Kong', hour12: false }) : '—';
+  const displayClock = U.displayClock(), date = value => displayClock.format(value);
   let state = null, page = 'tasks', refreshing = false, bulkPending = false, timer, taskPage = 0, taskDraft, taskTemplate, siteDraft, detailId, detailOffset = 0;
   const selected = new Set();
   const qFields = [ ['concurrency','并发线程',1], ['maxAttemptsPerLane','每线程次数预算',1], ['intervalSeconds','排队间隔（秒）',.001], ['intervalMaxSeconds','随机间隔上限（可空）',.001], ['firstEventTimeoutSeconds','首事件超时（秒）',.001], ['responseTimeoutSeconds','完整响应总超时（秒）',.001], ['idleTimeoutSeconds','完整响应空闲超时（秒）',.001], ['maxResponseBytes','响应字节上限',1] ];
@@ -22,8 +22,12 @@
   function notice(text, error=false) { $('notice').hidden=!text; $('notice').textContent=text; $('notice').className=error?'error':''; }
   const api = async (method,path,body) => {
     if (!window.Router2API?.request) throw Error('宿主页面桥未就绪；请在 Router2API 插件页面打开');
+    const requestedAt=Date.now();
     const result=await window.Router2API.request(method,path,body);
-    if (result?.error && !result?.config) throw Error(result.error); return result;
+    const receivedAt=Date.now();
+    if (result?.error && !result?.config) throw Error(result.error);
+    if(method==='GET')displayClock.sync(result?.serverNow,requestedAt,receivedAt);
+    return result;
   };
   const get = path => api('GET',path), post = (path,body) => api('POST',path,body);
   const button = (title, work, cls='secondary') => { const node=el('button',title,cls);node.type='button';node.addEventListener('click',()=>act(node,work));return node; };

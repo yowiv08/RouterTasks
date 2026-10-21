@@ -15,7 +15,7 @@ namespace Plugins.RouterTasks;
 [ModelCache(Disabled = true)]
 public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModule, IPluginMainPageProvider
 {
-    public const string Version = "0.3";
+    public const string Version = "0.3.1";
     private readonly IPluginServices _host;
     private readonly CredentialVault _vault;
     private readonly SourcePromptService _sources;
@@ -77,7 +77,7 @@ public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModu
     public Task<PluginResult> StateAsync(PluginHttpContext context) => Api(context, async () =>
     {
         var data = await Store.ReadAsync(context.CancellationToken);
-        return context.Ok(new { version = Version, data.Revision, data.Sites, data.Keys, data.Settings, data.Stats,
+        return context.Ok(new { serverNow = _clock.Now, version = Version, data.Revision, data.Sites, data.Keys, data.Settings, data.Stats,
             templates = data.Templates.Select(t => new { t.Id, t.Name, t.Protocol, t.Path }),
             tasks = data.Tasks.Select(t => new { config = t.Config with { RequestOverride = null }, t.ConfigRevision,
                 hasRequestOverride = t.Config.RequestOverride is not null, runtime = t.Runtime with { Lanes = t.Runtime.Lanes.Take(8).ToList() }, totalLanes = t.Runtime.Lanes.Count }),
@@ -91,7 +91,7 @@ public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModu
         var document = await Store.ReadAsync(context.CancellationToken);
         var task = TaskStore.Find(document, QueryId(context));
         var offset = int.TryParse(context.Query.GetValueOrDefault("laneOffset"), out var n) ? Math.Max(0, n) : 0;
-        return context.Ok(new { task.Config, task.ConfigRevision, task.Events, task.Snapshot,
+        return context.Ok(new { serverNow = _clock.Now, task.Config, task.ConfigRevision, task.Events, task.Snapshot,
             stats = document.Stats.Where(s => s.TaskId == task.Config.Id),
             notifications = document.Notifications.Where(n => n.TaskId == task.Config.Id).Reverse(),
             runtime = task.Runtime with { Lanes = task.Runtime.Lanes.Skip(offset).Take(100).ToList() }, totalLanes = task.Runtime.Lanes.Count });

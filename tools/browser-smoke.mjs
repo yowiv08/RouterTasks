@@ -9,7 +9,7 @@ import { pageHtml, fixtureData, controller, sampleConfig } from '../tests/ui/har
 const out = resolve(process.env.ROUTERTASKS_BROWSER_OUTPUT || 'artifacts/browser');
 await mkdir(out,{recursive:true});
 const data=await fixtureData(), api=controller(data), checks=[];
-const now=new Date().toISOString();
+const hostLag=5*60*1000, now=new Date(Date.now()-hostLag).toISOString();
 const definitions=[
   ['排队入口 · Responses','queue_then_keepalive','running','queue',false,500],
   ['工作时段持续保活','keepalive','running','keepalive',true,200],
@@ -25,6 +25,8 @@ for(const [i,def] of definitions.entries()) {
       sessionConfirmed:confirmed,lastSuccessAt:i!==0?now:null,lastHttpStatus:code,matchedRule:code===500?'HTTP 500':code===200?'SSE accepted':null,
       pauseReason:i===2?'HTTP 500 命中排队规则；自动重新排队已关闭':null,nextAttemptAt:status==='running'?now:null,lanes},totalLanes:i===0?12:0});
 }
+data.tasks[1].runtime.lastSuccessAt=new Date(Date.parse(now)-30000).toISOString();
+data.tasks[1].runtime.nextAttemptAt=new Date(Date.parse(now)+90000).toISOString();
 data.activeCount=3;
 data.stats=[{taskId:'task1',day:now.slice(0,10),protocol:'responses',entered:3,recoveries:2,heartbeats:41}];
 const bridge=`<script>(()=>{let n=0;const pending=new Map();addEventListener('message',e=>{if(e.data?.type!=='router2api-response')return;const p=pending.get(e.data.id);if(!p)return;pending.delete(e.data.id);e.data.ok?p.resolve(e.data.body):p.reject(Error(e.data.error));});window.Router2API={request:(method,route,body)=>new Promise((resolve,reject)=>{const id=String(++n);pending.set(id,{resolve,reject});parent.postMessage({type:'router2api-request',id,method,route,body},'*');})};})();</script>`;
@@ -36,7 +38,9 @@ const server=createServer(async (req,res)=>{
   if(req.url==='/'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});res.end(wrapper);return;}
   if(!req.url.startsWith('/api/plugins/router-tasks/')){res.writeHead(404);res.end();return;}
   try {let body='';for await(const part of req){body+=part;if(body.length>1048576)throw Error('Too large');}
-    const value=await api.request(req.method,req.url.slice('/api/plugins/router-tasks/'.length),body?JSON.parse(body):undefined);
+    const route=req.url.slice('/api/plugins/router-tasks/'.length);
+    const value=await api.request(req.method,route,body?JSON.parse(body):undefined);
+    if(req.method==='GET'&&['state','tasks/detail'].includes(route.split('?')[0]))value.serverNow=new Date(Date.now()-hostLag).toISOString();
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(value));
   }catch(error){res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:error.message}));}
 });
@@ -48,13 +52,23 @@ try {
   if(process.env.BROWSER_EXECUTABLE)options.executablePath=process.env.BROWSER_EXECUTABLE;
   else if(process.platform==='win32')options.channel='chrome';
   browser=await chromium.launch(options);
-  const context=await browser.newContext({viewport:{width:1440,height:1100},locale:'zh-CN'});
+  const context=await browser.newContext({viewport:{width:1440,height:1100},locale:'zh-CN',timezoneId:'America/Los_Angeles'});
   const errors=[],blocked=[];await context.route('**/*',route=>route.request().url().startsWith(origin)?route.continue():(blocked.push(route.request().url()),route.abort()));
   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
   await page.goto(origin);const frame=page.frameLocator('#plugin');await frame.locator('#taskList .task-card').first().waitFor();
   assert.equal(await frame.locator('nav button').count(),2);
   assert.equal(await frame.locator('#taskList .task-card').count(),5);
   assert.match(await frame.locator('#taskList').innerText(),/等待心跳确认/);checks.push('账号任务与请求模板双导航，三模式状态展示');
+  const displayedTimes=await frame.locator('.task-card[data-id="task1"] .task-info>div').allTextContents();
+  const shanghaiTimestamp=text=>{
+    const [year,month,day,hour,minute,second]=text.match(/\d+/g).map(Number);
+    return Date.UTC(year,month-1,day,hour-8,minute,second);
+  };
+  const next=shanghaiTimestamp(displayedTimes[0]),last=shanghaiTimestamp(displayedTimes[1]);
+  assert.ok(Math.abs(next-(Date.parse(now)+hostLag+90000))<2000,displayedTimes.join('；'));
+  assert.ok(Math.abs(last-(Date.parse(now)+hostLag-30000))<2000,displayedTimes.join('；'));
+  assert.equal(next-last,120000);
+  checks.push('宿主慢 5 分钟、浏览器为洛杉矶时区时，卡片按本机时钟校准为上海时间且保留请求间隔');
   const laneDetails=frame.locator('#taskList .task-card').first().locator('.lane-details');
   await laneDetails.locator('summary').click();
   const laneLayout=await laneDetails.evaluate(node=>({height:node.getBoundingClientRect().height,scrollHeight:node.scrollHeight,width:node.clientWidth,scrollWidth:node.scrollWidth,overflow:getComputedStyle(node).overflow}));

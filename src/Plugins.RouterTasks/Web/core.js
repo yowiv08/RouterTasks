@@ -1,6 +1,24 @@
 (function (root) {
   'use strict';
   const copy = value => JSON.parse(JSON.stringify(value));
+  function displayClock() {
+    let offset = 0;
+    const formatter = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+    return Object.freeze({
+      sync(serverNow, requestedAt, receivedAt) {
+        const server = typeof serverNow === 'string' ? Date.parse(serverNow) : NaN;
+        if (!Number.isFinite(server) || !Number.isFinite(requestedAt) || !Number.isFinite(receivedAt) || receivedAt < requestedAt) return;
+        // 用请求往返的中点估算时差，让宿主记录映射到查看页面的电脑时钟。
+        offset = requestedAt + (receivedAt - requestedAt) / 2 - server;
+      },
+      format(value) {
+        const timestamp = typeof value === 'string' ? Date.parse(value) : NaN;
+        const adjusted = new Date(timestamp + offset);
+        return Number.isFinite(adjusted.getTime()) ? formatter.format(adjusted) : '—';
+      }
+    });
+  }
   // 模板数值保持原始 JSON token；不将 Int64、高精度小数或指数先转成 Number。
   class RawNumber { constructor(source) { this.source = source; } }
   function parseJson(text) {
@@ -113,6 +131,6 @@
     result.body = stringify(body);
     return result;
   }
-  root.RouterTasksUI = Object.freeze({ copy, modes, eventNames, parseCodes, defaults, status, taskActions, remaining, jsonObject, setKnownField,
+  root.RouterTasksUI = Object.freeze({ copy, displayClock, modes, eventNames, parseCodes, defaults, status, taskActions, remaining, jsonObject, setKnownField,
     parseJson, stringify, wireTemplate, displayTemplate, importConfig, importAccount, settingsDefaults });
 })(globalThis);

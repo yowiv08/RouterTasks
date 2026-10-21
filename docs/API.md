@@ -20,6 +20,8 @@
 | POST | keys/refresh | 查询账号模型和额度 |
 | POST | notifications/resume | 恢复指定账号的暂停通知 |
 
+`state` 与 `tasks/detail` 响应中的 `serverNow` 是生成响应时的 UTC 时间参考。浏览器用它与本机时间的差值校准页面显示，并统一按 `Asia/Shanghai` 时区格式化；运行记录、事件时间和任务调度保持原始时间。
+
 ### 保存账号
 
 ```json
