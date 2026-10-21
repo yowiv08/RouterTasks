@@ -30,6 +30,7 @@ public sealed record SiteConfig
     public string BaseUrl { get; set; } = "https://anyrouter.top";
     public string Route { get; set; } = "direct";
     public string[] SubscriptionIds { get; set; } = [];
+    public string? ProxyId { get; set; }
     public int[] QueueHttpStatuses { get; set; } = [500];
 }
 
@@ -106,6 +107,8 @@ public sealed record LaneState
     public string Status { get; set; } = "waiting";
     public DateTimeOffset? NextAttemptAt { get; set; }
     public string? LastError { get; set; }
+    public string? LastRoute { get; set; }
+    public ProxyPoolNode? LastProxy { get; set; }
 }
 
 public sealed record TaskRuntime
@@ -128,6 +131,8 @@ public sealed record TaskRuntime
     public DateTimeOffset? DropPendingSince { get; set; }
     public string? PauseReason { get; set; }
     public string? LastError { get; set; }
+    public string? LastRoute { get; set; }
+    public ProxyPoolNode? LastProxy { get; set; }
     public int? LastHttpStatus { get; set; }
     public string? MatchedRule { get; set; }
     public DateTimeOffset? StartedAt { get; set; }
@@ -169,6 +174,8 @@ public sealed record KeyInfo
     public bool Unlimited { get; set; }
     public DateTimeOffset? UsageAt { get; set; }
     public string? UsageError { get; set; }
+    public string? LastRoute { get; set; }
+    public ProxyPoolNode? LastProxy { get; set; }
 }
 
 public sealed record PluginSettings

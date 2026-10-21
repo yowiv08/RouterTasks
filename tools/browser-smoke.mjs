@@ -9,6 +9,9 @@ import { pageHtml, fixtureData, controller, sampleConfig } from '../tests/ui/har
 const out = resolve(process.env.ROUTERTASKS_BROWSER_OUTPUT || 'artifacts/browser');
 await mkdir(out,{recursive:true});
 const data=await fixtureData(), api=controller(data), checks=[];
+const manualProxy={id:'manual-browser',subscriptionId:'manual',address:'http://127.0.0.1:18080',state:'Ready',available:true};
+const subscriptionProxy={id:'subscription-browser',subscriptionId:'browser-source',address:'socks5://127.0.0.1:11080',state:'Ready',available:true};
+data.proxyCatalog={subscriptions:[{id:'manual',name:'手动节点',enabled:true},{id:'browser-source',name:'浏览器测试订阅',enabled:true}],nodes:[manualProxy,subscriptionProxy]};
 const hostLag=5*60*1000, now=new Date(Date.now()-hostLag).toISOString();
 const definitions=[
   ['排队入口 · Responses','queue_then_keepalive','running','queue',false,500],
@@ -27,6 +30,8 @@ for(const [i,def] of definitions.entries()) {
 }
 data.tasks[1].runtime.lastSuccessAt=new Date(Date.parse(now)-30000).toISOString();
 data.tasks[1].runtime.nextAttemptAt=new Date(Date.parse(now)+90000).toISOString();
+Object.assign(data.tasks[1].runtime,{lastRoute:'pool',lastProxy:manualProxy});
+Object.assign(data.tasks[0].runtime.lanes[0],{lastRoute:'pool',lastProxy:subscriptionProxy});
 data.activeCount=3;
 data.stats=[{taskId:'task1',day:now.slice(0,10),protocol:'responses',entered:3,recoveries:2,heartbeats:41}];
 const bridge=`<script>(()=>{let n=0;const pending=new Map();addEventListener('message',e=>{if(e.data?.type!=='router2api-response')return;const p=pending.get(e.data.id);if(!p)return;pending.delete(e.data.id);e.data.ok?p.resolve(e.data.body):p.reject(Error(e.data.error));});window.Router2API={request:(method,route,body)=>new Promise((resolve,reject)=>{const id=String(++n);pending.set(id,{resolve,reject});parent.postMessage({type:'router2api-request',id,method,route,body},'*');})};})();</script>`;
@@ -59,6 +64,9 @@ try {
   assert.equal(await frame.locator('nav button').count(),2);
   assert.equal(await frame.locator('#taskList .task-card').count(),5);
   assert.match(await frame.locator('#taskList').innerText(),/等待心跳确认/);checks.push('账号任务与请求模板双导航，三模式状态展示');
+  assert.match(await frame.locator('.task-card[data-id="task1"] .task-network').innerText(),/18080/);
+  assert.match(await frame.locator('.task-card[data-id="task0"] .lane-details').textContent(),/11080/);
+  checks.push('账号卡片与线程摘要显示实际代理节点');
   const displayedTimes=await frame.locator('.task-card[data-id="task1"] .task-info>div').allTextContents();
   const shanghaiTimestamp=text=>{
     const [year,month,day,hour,minute,second]=text.match(/\d+/g).map(Number);
@@ -108,6 +116,33 @@ try {
   await frame.locator('#taskForm [name=token]').fill('TOKEN-browser-account');
   await frame.locator('#queryAccount').click();await frame.locator('#modelOptions option').first().waitFor({state:'attached'});
   assert.match(await frame.locator('#modelQueryStatus').innerText(),/2 个模型/);checks.push('添加账号时直接查询模型与额度');
+  await frame.locator('#taskForm [name=route]').selectOption('pool');
+  await frame.locator('#proxyCatalogStatus').getByText('2 个可用节点',{exact:true}).waitFor();
+  await frame.locator('#taskForm [name=proxySourceMode]').selectOption('manual');
+  await frame.locator('#taskForm [name=proxyId]').selectOption('manual-browser');
+  await frame.locator('#taskForm [name=proxySourceMode]').selectOption('selected');
+  await frame.locator('#proxySubscriptions [data-proxy-source="browser-source"]').check();
+  await frame.locator('#proxySubscriptions [data-proxy-source="manual"]').uncheck();
+  assert.equal(await frame.locator('#taskForm [name=proxyId]').inputValue(),'manual-browser');
+  assert.match(await frame.locator('#proxySelectionStatus').innerText(),/运行时将报错/);
+  await frame.locator('#taskForm [name=proxyId]').selectOption('subscription-browser');
+  assert.doesNotMatch(await frame.locator('#proxySelectionStatus').innerText(),/运行时将报错/);
+  await frame.locator('#taskForm [name=proxySourceMode]').selectOption('manual');
+  await frame.locator('#taskForm [name=proxyId]').selectOption('manual-browser');
+  data.queryResult={lastProxy:manualProxy};
+  const proxyQuery=page.waitForResponse(result=>result.url().endsWith('/accounts/query'));
+  await frame.locator('#queryAccount').click();await proxyQuery;
+  await frame.locator('#modelQueryStatus').getByText(/18080/).waitFor();
+  const query=api.calls.filter(call=>call.path==='accounts/query').at(-1);
+  assert.deepEqual(query.body.site.subscriptionIds,['manual']);assert.equal(query.body.site.proxyId,'manual-browser');
+  await page.screenshot({path:resolve(out,'proxy-selection.png')});
+  data.proxyCatalog.nodes=[];await frame.locator('#refreshProxies').click();
+  await frame.locator('#proxyCatalogStatus').getByText('0 个可用节点',{exact:true}).waitFor();
+  assert.equal(await frame.locator('#taskForm [name=proxyId]').inputValue(),'manual-browser');
+  assert.match(await frame.locator('#taskForm [name=proxyId] option:checked').innerText(),/节点已失效/);
+  data.proxyCatalog.nodes=[manualProxy,subscriptionProxy];await frame.locator('#refreshProxies').click();
+  await frame.locator('#proxyCatalogStatus').getByText('1 个可用节点',{exact:true}).waitFor();
+  checks.push('代理来源全选、仅手动、指定订阅与固定节点，越界及删除保持选择，草稿查询携带代理配置');
   await frame.locator('#taskForm [name=model]').fill('MODEL');
   await frame.locator('#taskForm [name=prompt]').fill('测试保活');await frame.locator('#taskForm [name=prompt]').press('Tab');
   await frame.locator('#taskForm [name=autoRequeue]').uncheck();
@@ -131,6 +166,7 @@ try {
   const saved=api.calls.find(c=>c.path==='accounts/save');
   assert.equal(saved.body.config.autoRequeue,false);assert.deepEqual(saved.body.site.queueHttpStatuses,[500,429]);
   assert.equal(saved.body.config.claude1MContext,false);
+  assert.deepEqual(saved.body.site.subscriptionIds,['manual']);assert.equal(saved.body.site.proxyId,'manual-browser');
   assert.equal(saved.body.secrets.telegramChatId,'CHAT-browser-account');assert.equal(saved.body.config.settings.telegramEnabled,true);
   assert.match(saved.body.config.requestOverride.body,/9007199254740993123456789/);checks.push('账号连接、阶段参数与独立通知统一保存');
   await frame.locator('#taskList .task-card').last().locator('.task-logs').click();await frame.locator('#detailDialog').waitFor({state:'visible'});
@@ -142,11 +178,14 @@ try {
   await frame.locator('#taskList .task-card').last().getByRole('button',{name:'导出账号',exact:true}).click();
   await frame.locator('#exportDialog').waitFor({state:'visible'});
   const exported=await frame.locator('#exportText').inputValue();assert.match(exported,/TOKEN-browser-account/);assert.match(exported,/BOT-browser-account/);
+  assert.equal(JSON.parse(exported).account.site.proxyId,'manual-browser');
   await frame.locator('[data-close=exportDialog]').first().click();
   await frame.locator('#importFile').setInputFiles({name:'account.json',mimeType:'application/json',buffer:Buffer.from(exported)});
   await frame.locator('#taskDialog').waitFor({state:'visible'});
   assert.equal(await frame.locator('#taskForm [name=token]').inputValue(),'TOKEN-browser-account');
   assert.equal(await frame.locator('#taskForm [name=telegramChatId]').inputValue(),'CHAT-browser-account');
+  assert.equal(await frame.locator('#taskForm [name=proxyId]').inputValue(),'manual-browser');
+  assert.equal(await frame.locator('#taskForm [name=proxySourceMode]').inputValue(),'manual');
   assert.notEqual(await frame.locator('#taskForm [name=id]').inputValue(),saved.body.config.id);
   await frame.locator('#taskDialog [data-close=taskDialog]').first().click();checks.push('账号导出与导入保留独立凭据及 JSON 精度');
   await frame.locator('#newAccount').click();await frame.locator('#taskDialog').waitFor({state:'visible'});
@@ -175,6 +214,11 @@ try {
   const sizes=await frame.locator('html').evaluate(n=>({scroll:n.scrollWidth,width:n.clientWidth}));
   assert.ok(sizes.scroll<=sizes.width,JSON.stringify(sizes));
   await frame.locator('#newAccount').click();await frame.locator('#taskDialog').waitFor({state:'visible'});
+  await frame.locator('#taskForm [name=route]').selectOption('pool');
+  await frame.locator('#proxyCatalogStatus').getByText('2 个可用节点',{exact:true}).waitFor();
+  await frame.locator('#taskForm [name=proxySourceMode]').selectOption('selected');
+  const proxySize=await frame.locator('#proxyFields').evaluate(node=>({scroll:node.scrollWidth,width:node.clientWidth}));
+  assert.ok(proxySize.scroll<=proxySize.width+1,JSON.stringify(proxySize));
   await page.screenshot({path:resolve(out,'mobile-editor.png')});
   const footer=await frame.locator('#taskForm button[type=submit]').boundingBox();
   assert.ok(footer&&footer.y+footer.height<=844);checks.push('390px 移动端无横向溢出，账号保存按钮可见');

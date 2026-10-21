@@ -46,7 +46,13 @@ internal static partial class Validation
     {
         if (site is null) throw new FormatException("站点不能为空");
         Id(site.Id); BaseUri(site.BaseUrl); Codes(site.QueueHttpStatuses);
-        if (site.SubscriptionIds is null || site.SubscriptionIds.Any(string.IsNullOrWhiteSpace)) throw new FormatException("代理订阅 ID 列表无效");
+        if (site.SubscriptionIds is null || site.SubscriptionIds.Length > 100
+            || site.SubscriptionIds.Any(id => string.IsNullOrWhiteSpace(id) || id.Trim().Length > 256 || id.Any(char.IsControl)))
+            throw new FormatException("代理来源最多 100 个；ID 不能为空、超过 256 字符或包含控制字符");
+        site.SubscriptionIds = site.SubscriptionIds.Select(id => id.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (site.ProxyId is { } proxy && (proxy.Trim().Length > 256 || proxy.Any(char.IsControl)))
+            throw new FormatException("固定代理节点 ID 不能超过 256 字符或包含控制字符");
+        site.ProxyId = string.IsNullOrWhiteSpace(site.ProxyId) ? null : site.ProxyId.Trim();
         if (string.IsNullOrWhiteSpace(site.Name) || site.Name.Length > 200 || site.Route is not ("direct" or "pool"))
             throw new FormatException("站点名称或网络路线无效");
     }

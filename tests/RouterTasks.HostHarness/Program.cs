@@ -65,16 +65,33 @@ if (storageOnly)
         .Returns((string id, CancellationToken token) => persistentAccounts.DeleteAsync("router-tasks", id, token));
 }
 Uri? telegramEndpoint = null;
+var directClientCount = 0;
 var http = new Mock<IPluginHttpServices>();
 http.Setup(h => h.ApproveOriginAsync(It.IsAny<string>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
 http.Setup(h => h.CreateDirectClient(It.IsAny<PluginHttpClientOptions>())).Returns((PluginHttpClientOptions options) =>
-    new HttpClient(new LoopbackOnlyHandler(new SocketsHttpHandler { AllowAutoRedirect = options.AllowAutoRedirect, UseProxy = false, UseCookies = false }, () => telegramEndpoint))
-    { Timeout = options.RequestTimeout });
+{
+    Interlocked.Increment(ref directClientCount);
+    return new HttpClient(new LoopbackOnlyHandler(new SocketsHttpHandler { AllowAutoRedirect = options.AllowAutoRedirect, UseProxy = false, UseCookies = false }, () => telegramEndpoint))
+    { Timeout = options.RequestTimeout };
+});
 var services = new Mock<IPluginServices>();
 services.SetupGet(s => s.PluginKey).Returns("router-tasks"); services.SetupGet(s => s.Accounts).Returns(accounts.Object);
 services.SetupGet(s => s.Http).Returns(http.Object); services.SetupGet(s => s.Log).Returns(Mock.Of<IPluginLogSink>());
 services.SetupGet(s => s.Jobs).Returns(Mock.Of<IPluginJobs>());
 var host = new Mock<IPluginHost>(); host.SetupGet(h => h.PluginKey).Returns("router-tasks"); host.SetupGet(h => h.Services).Returns(services.Object);
+using var proxyTransport = new ProxyTransportFactory();
+var proxyClients = new ProxyHttpClientFactory(proxyTransport);
+ProxyEndpoint[] proxyNodes = [];
+var proxyStore = new Mock<IProxyStore>();
+proxyStore.Setup(p => p.ListAsync(It.IsAny<CancellationToken>())).ReturnsAsync(() => proxyNodes);
+var proxySubscriptions = new Mock<IProxySubscriptionService>();
+proxySubscriptions.Setup(p => p.ListAsync(It.IsAny<CancellationToken>())).ReturnsAsync([
+    new ProxySubscription { Id = "sub-a", Name = "Enabled source", Enabled = true, Url = "https://subscription.invalid/?token=SUBSCRIPTION-secret" },
+    new ProxySubscription { Id = "sub-disabled", Name = "Disabled source", Enabled = false }
+]);
+host.Setup(h => h.GetServiceAsync<IProxyStore>()).ReturnsAsync(proxyStore.Object);
+host.Setup(h => h.GetServiceAsync<IProxySubscriptionService>()).ReturnsAsync(proxySubscriptions.Object);
+host.Setup(h => h.GetServiceAsync<IProxyHttpClientFactory>()).ReturnsAsync(proxyClients);
 var factory = new Mock<IPluginHostFactory>(); factory.Setup(f => f.Create(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>())).Returns(host.Object);
 var registry = new PlatformRegistry();
 var authOptions = new AuthOptions { Admin = new AdminOptions { Users = [new AdminUserOptions { Username = "local-test", Password = Guid.NewGuid().ToString("N") }] }, ApiKey = new ApiKeyOptions { Key = "local-test-api-key" } };
@@ -123,9 +140,21 @@ app.MapPost("/upstream/v1/responses", async (HttpContext context) =>
     catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { Interlocked.Increment(ref upstreamCancelled); }
     finally { Interlocked.Decrement(ref upstreamActive); }
 });
+app.MapGet("/proxy-upstream/v1/models", () => Results.Json(new { data = new[] { new { id = "MODEL" } } }));
+app.MapGet("/proxy-upstream/v1/dashboard/billing/usage", () => Results.Json(new { total_usage = 125 }));
+app.MapGet("/proxy-upstream/v1/dashboard/billing/subscription", () => Results.Json(new { hard_limit_usd = 25 }));
 catalog.MapEndpoints(app);
 await app.StartAsync();
 var origin = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
+await using var manualProxy = await LoopbackHttpProxy.StartAsync(origin);
+await using var subscriptionProxy = await LoopbackHttpProxy.StartAsync(origin);
+proxyNodes = [
+    new ProxyEndpoint { Id = "chosen", SubscriptionId = "manual", Host = "127.0.0.1", Port = manualProxy.Port, Username = "PROXY-user", Password = "PROXY-secret" },
+    new ProxyEndpoint { Id = "subscribed", SubscriptionId = "sub-a", Host = "127.0.0.1", Port = subscriptionProxy.Port },
+    new ProxyEndpoint { Id = "cooling", SubscriptionId = "manual", Host = "127.0.0.1", Port = subscriptionProxy.Port,
+        Status = new ResourceStatus { State = ResourceState.Cooling, CooldownUntil = DateTimeOffset.UtcNow.AddMinutes(5) } },
+    new ProxyEndpoint { Id = "disabled-source", SubscriptionId = "sub-disabled", Host = "127.0.0.1", Port = subscriptionProxy.Port }
+];
 telegramEndpoint = new Uri(origin + "/notifications/telegram");
 using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { BaseAddress = new Uri(origin) };
 var checks = new List<string>();
@@ -179,7 +208,44 @@ try
         Console.WriteLine(JsonSerializer.Serialize(new { passed = checks.Count, upstreamCalls, report }));
         return;
     }
-    await Post("sites/save", new { id = "site", name = "Loopback", baseUrl = origin + "/upstream", route = "direct" });
+    var proxyCatalog = await Get("network/proxies");
+    Check(proxyCatalog["subscriptions"]!.AsArray().Any(s => s!["id"]!.GetValue<string>() == "manual"), "代理目录包含手动来源");
+    Check(proxyCatalog["nodes"]!.AsArray().Single(n => n!["id"]!.GetValue<string>() == "chosen")!["available"]!.GetValue<bool>(), "公开宿主服务列出可用节点");
+    Check(proxyCatalog["nodes"]!.AsArray().Where(n => n!["id"]!.GetValue<string>() is "cooling" or "disabled-source")
+        .All(n => !n!["available"]!.GetValue<bool>()), "目录遵守节点冷却和订阅禁用状态");
+    var catalogJson = proxyCatalog.ToJsonString();
+    Check(!catalogJson.Contains("PROXY-user", StringComparison.Ordinal) && !catalogJson.Contains("PROXY-secret", StringComparison.Ordinal)
+        && !catalogJson.Contains("SUBSCRIPTION-secret", StringComparison.Ordinal), "代理目录不返回节点认证或订阅 URL 凭据");
+    object ProxyQuery(string[] sources, string? proxyId) => new
+    {
+        site = new { id = "draft-proxy", name = "Proxy query", baseUrl = "http://upstream.invalid/proxy-upstream", route = "pool", subscriptionIds = sources, proxyId },
+        token = "TOKEN-loopback-only"
+    };
+    var beforeDirect = directClientCount;
+    for (var i = 0; i < 2; i++)
+    {
+        var queried = await Post("accounts/query", ProxyQuery([], "chosen"));
+        Check(queried!["authStatus"]!.GetValue<string>() == "ready" && queried["models"]![0]!.GetValue<string>() == "MODEL"
+            && queried["usedUsd"]!.GetValue<decimal>() == 1.25m, "固定节点完成模型与额度查询 " + (i + 1));
+        Check(queried["lastRoute"]!.GetValue<string>() == "pool" && queried["lastProxy"]!["id"]!.GetValue<string>() == "chosen", "查询返回实际固定节点 " + (i + 1));
+    }
+    Check(manualProxy.Requests == 6 && subscriptionProxy.Requests == 0 && manualProxy.ConnectionCount == 1,
+        "跨客户端的六次查询复用官方宿主物理连接池且只使用固定节点");
+    var manual = await Post("accounts/query", ProxyQuery(["manual"], null));
+    Check(manual!["lastProxy"]!["id"]!.GetValue<string>() == "chosen" && manualProxy.Requests == 9, "仅手动来源自动选择手动节点");
+    var subscribed = await Post("accounts/query", ProxyQuery(["sub-a"], null));
+    Check(subscribed!["lastProxy"]!["id"]!.GetValue<string>() == "subscribed" && subscriptionProxy.Requests == 3, "限定订阅只选择该订阅的节点");
+    var beforeRejected = manualProxy.Requests + subscriptionProxy.Requests;
+    foreach (var selection in new[] { (Sources: Array.Empty<string>(), Id: "missing"), (Sources: new[] { "sub-a" }, Id: "chosen"),
+        (Sources: new[] { "manual" }, Id: "cooling"), (Sources: new[] { "sub-disabled" }, Id: "disabled-source") })
+    {
+        using var rejected = await client.PostAsJsonAsync("/api/plugins/router-tasks/accounts/query", ProxyQuery(selection.Sources, selection.Id));
+        Check(rejected.StatusCode == HttpStatusCode.ServiceUnavailable, "失效或越界固定节点明确返回 503：" + selection.Id);
+    }
+    Check(manualProxy.Requests + subscriptionProxy.Requests == beforeRejected && directClientCount == beforeDirect,
+        "代理选择失败没有请求其他节点或回退直连");
+    await Post("sites/save", new { id = "site", name = "Loopback", baseUrl = "http://upstream.invalid/upstream", route = "pool",
+        subscriptionIds = new[] { "manual" }, proxyId = "chosen" });
     var key = await Post("keys/save", new { siteId = "site", alias = "Loopback", token = "TOKEN-loopback-only" });
     await Post("templates/save", new { id = "simple", name = "Loopback", protocol = "responses", path = "responses", headers = new { Authorization = "Bearer {{TOKEN}}" },
         body = "{\"model\":\"{{MODEL}}\",\"input\":\"{{PROMPT}}\",\"stream\":true,\"unknown\":9007199254740993123456789}" });
@@ -200,6 +266,8 @@ try
     await Until(async () => upstreamCalls >= 3 && (await State())["activeCount"]!.GetValue<int>() == 1);
     var state = await State();
     Check(state["tasks"]![0]!["runtime"]!["phase"]!.GetValue<string>() == "keepalive", "模型请求与三阶段状态");
+    Check(state["tasks"]![0]!["runtime"]!["lastRoute"]!.GetValue<string>() == "pool"
+        && state["tasks"]![0]!["runtime"]!["lastProxy"]!["id"]!.GetValue<string>() == "chosen", "后台探针记录实际固定代理节点");
     Check(!state.ToJsonString().Contains("TOKEN-loopback-only", StringComparison.Ordinal), "管理员状态不返回凭据");
     await Until(async () => (await State())["notifications"]!.AsArray().Count(n => n!["state"]!.GetValue<string>() == "sent") == 2);
     Check(notificationDeliveries.Count == 2 && notificationDeliveries.Distinct().Count() == 2,
@@ -211,6 +279,8 @@ try
     state = await State();
     Check(catalog.Get("router-tasks")!.DirectoryPath != previous, "热更新更换程序集快照");
     Check(state["activeCount"]!.GetValue<int>() == 0 && state["tasks"]![0]!["runtime"]!["status"]!.GetValue<string>() == "paused", "热更新暂停任务并释放请求");
+    await Until(() => Task.FromResult(manualProxy.Active == 0));
+    Check(manualProxy.Cancelled > 0, "热更新取消经真实宿主代理连接发送的 SSE 请求");
     Check(state["tasks"]![0]!["runtime"]!["totalAttempts"]!.GetValue<long>() == 3 && !state["tasks"]![0]!["runtime"]!["sessionConfirmed"]!.GetValue<bool>(), "计数保留且历史成功不冒充保活");
     Check(state["notifications"]!.AsArray().All(n => n!["state"]!.GetValue<string>() == "sent") && notificationDeliveries.Count == 2,
         "插件重载保留通知回执，不重复发送");
@@ -221,6 +291,7 @@ try
     weakContexts.AddRange(Contexts());
     await catalog.SetEnabledAsync("router-tasks", false, default);
     await Until(() => Task.FromResult(upstreamActive == 0));
+    await Until(() => Task.FromResult(manualProxy.Active == 0));
     Check(catalog.Get("router-tasks")?.State == "Disabled", "禁用插件取消后台请求");
     var disableGcAttempts = await CollectContextsAsync(weakContexts);
     Check(weakContexts.All(w => !w.IsAlive), "禁用插件释放上下文");
@@ -237,6 +308,8 @@ try
     Check(weakContexts.Count == 3, "记录首次加载、热更新和重新启用的三个上下文");
     Check(weakContexts.All(w => !w.IsAlive), "可回收程序集上下文释放");
     await File.WriteAllTextAsync(Path.Combine(root, "host-report.json"), JsonSerializer.Serialize(new { checks, upstreamCalls, upstreamCancelled, upstreamActive,
+        proxyRequests = manualProxy.Requests + subscriptionProxy.Requests, proxyCancelled = manualProxy.Cancelled,
+        proxyConnections = manualProxy.ConnectionCount + subscriptionProxy.ConnectionCount,
         notificationDeliveries = notificationDeliveries.ToArray(),
         unloadContexts = weakContexts.Count, collectedContexts = weakContexts.Count(w => !w.IsAlive), reloadGcAttempts, disableGcAttempts, gcAttempts,
         hostVersion = typeof(PluginCatalog).Assembly.GetName().Version!.ToString() }, new JsonSerializerOptions { WriteIndented = true }));
@@ -288,6 +361,81 @@ internal sealed class LoopbackOnlyHandler(HttpMessageHandler inner, Func<Uri?> t
             Uri.UnescapeDataString(uri.AbsolutePath) == "/bot123456789:LOCAL-test-token/sendMessage")
             request.RequestUri = telegramEndpoint() ?? throw new InvalidOperationException("本地通知接口尚未启动");
         return request.RequestUri?.IsLoopback == true ? base.SendAsync(request, token) : throw new InvalidOperationException("隔离宿主只允许回环 HTTP");
+    }
+}
+
+/// <summary>接受 HTTP 代理请求并只转到本验收的回环上游，使用宿主真实 WebProxy 传输。</summary>
+internal sealed class LoopbackHttpProxy : IAsyncDisposable
+{
+    private readonly WebApplication _app;
+    private readonly HttpClient _forward = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = false })
+        { Timeout = Timeout.InfiniteTimeSpan };
+    private readonly ConcurrentDictionary<string, byte> _connections = new();
+    private int _requests, _active, _cancelled;
+    public int Port { get; private set; }
+    public int Requests => Volatile.Read(ref _requests);
+    public int Active => Volatile.Read(ref _active);
+    public int Cancelled => Volatile.Read(ref _cancelled);
+    public int ConnectionCount => _connections.Count;
+
+    private LoopbackHttpProxy(string upstreamOrigin)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        _app = builder.Build();
+        _app.Run(async context =>
+        {
+            if (context.Request.Host.Host != "upstream.invalid" || context.Request.Method is not ("GET" or "POST")
+                || !(context.Request.Path.StartsWithSegments("/upstream") || context.Request.Path.StartsWithSegments("/proxy-upstream")))
+            { context.Response.StatusCode = StatusCodes.Status403Forbidden; return; }
+            _connections.TryAdd(context.Connection.Id, 0);
+            Interlocked.Increment(ref _requests);
+            Interlocked.Increment(ref _active);
+            try
+            {
+                using var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), upstreamOrigin + context.Request.Path + context.Request.QueryString);
+                if (context.Request.Method == "POST")
+                {
+                    using var body = new MemoryStream();
+                    await context.Request.Body.CopyToAsync(body, context.RequestAborted);
+                    request.Content = new ByteArrayContent(body.ToArray());
+                    if (context.Request.ContentType is { } contentType) request.Content.Headers.TryAddWithoutValidation("Content-Type", contentType);
+                }
+                if (context.Request.Headers.Authorization.Count > 0)
+                    request.Headers.TryAddWithoutValidation("Authorization", context.Request.Headers.Authorization.ToArray());
+                using var response = await _forward.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
+                context.Response.StatusCode = (int)response.StatusCode;
+                context.Response.ContentType = response.Content.Headers.ContentType?.ToString();
+                context.Response.ContentLength = response.Content.Headers.ContentLength;
+                await context.Response.StartAsync(context.RequestAborted);
+                await response.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
+            }
+            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+            { Interlocked.Increment(ref _cancelled); }
+            catch (IOException) when (context.RequestAborted.IsCancellationRequested)
+            { Interlocked.Increment(ref _cancelled); }
+            finally { Interlocked.Decrement(ref _active); }
+        });
+    }
+
+    public static async Task<LoopbackHttpProxy> StartAsync(string upstreamOrigin)
+    {
+        var proxy = new LoopbackHttpProxy(upstreamOrigin);
+        try
+        {
+            await proxy._app.StartAsync();
+            proxy.Port = new Uri(proxy._app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single()).Port;
+            return proxy;
+        }
+        catch { await proxy.DisposeAsync(); throw; }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _forward.Dispose();
+        await _app.StopAsync();
+        await _app.DisposeAsync();
     }
 }
 

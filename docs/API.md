@@ -9,6 +9,7 @@
 | 方法 | 路由 | 功能 |
 | --- | --- | --- |
 | GET | state | 账号任务、连接元数据、模板摘要、运行状态 |
+| GET | network/proxies | 可选代理来源及节点目录（不含代理认证） |
 | GET | accounts/detail?id=ID | 账号配置、站点、完整 API Key、通知凭据与修订号 |
 | POST | accounts/save | 统一保存账号连接、请求参数、通知和日志设置 |
 | POST | accounts/preview | 展开完整请求内容 |
@@ -21,6 +22,14 @@
 | POST | notifications/resume | 恢复指定账号的暂停通知 |
 
 `state` 与 `tasks/detail` 响应中的 `serverNow` 是生成响应时的 UTC 时间参考。浏览器用它与本机时间的差值校准页面显示，并统一按 `Asia/Shanghai` 时区格式化；运行记录、事件时间和任务调度保持原始时间。
+
+### 代理选择
+
+`site.route` 为 `direct` 或 `pool`。`site.subscriptionIds=[]` 允许所有启用订阅及手动节点，`["manual"]` 仅允许手动节点，其他数组值限定到相应启用来源。`site.proxyId` 为固定节点 ID；`null`、空字符串或省略表示自动选择。账号保存是完整配置写入，请在编辑时保留详情返回的代理字段。
+
+`GET network/proxies` 返回 `subscriptions:[{id,name,enabled}]` 与 `nodes:[{id,subscriptionId,address,state,available}]`。目录中的不可用节点仅供显示现有选择；实际发送再次核验来源、状态及冷却窗口。固定节点不在范围内或没有可用节点时返回 503、`code=proxy_unavailable`，不会切换范围外节点或直连。代理服务缺失同样明确报错，不依赖旧版回退。
+
+模型/额度查询、任务运行快照与源码获取共用选择规则。一次模型/额度查询的多个 GET 共用同一节点和客户端。`KeyInfo`、`runtime`、`runtime.lanes[]` 的 `lastRoute`、`lastProxy` 保存实际出站；尚未取得节点时为 `null`。直连时 `lastRoute=direct`、`lastProxy=null`。日志记录安全节点摘要，完整代理凭据始终留在宿主。
 
 ### 保存账号
 

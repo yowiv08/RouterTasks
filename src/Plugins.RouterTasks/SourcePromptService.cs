@@ -2,8 +2,10 @@ using Router.Contracts.Host;
 
 namespace Plugins.RouterTasks;
 
-internal sealed class SourcePromptService(TaskStore store, IPluginHttpServices http, IRuntimeClock clock)
+internal sealed class SourcePromptService(TaskStore store, NetworkClientFactory network, IRuntimeClock clock)
 {
+    internal SourcePromptService(TaskStore store, IPluginHttpServices http, IRuntimeClock clock)
+        : this(store, new NetworkClientFactory(http), clock) { }
     private readonly SemaphoreSlim _gate = new(1, 1);
     private static readonly string[] Paths = ["kernel/fork.c", "kernel/sched/core.c", "mm/memory.c", "fs/read_write.c", "lib/string.c"];
     public async Task<string> GetAsync(RunSnapshot run, CancellationToken token)
@@ -25,7 +27,7 @@ internal sealed class SourcePromptService(TaskStore store, IPluginHttpServices h
             timeout.CancelAfter(TimeSpan.FromSeconds(8));
             try
             {
-                using var client = await HttpProbeClient.CreateClientAsync(http, run.Site, timeout.Token);
+                using var client = await network.CreateClientAsync(run.Site, timeout.Token);
                 for (var attempt = 0; attempt < 3 && snippet is null; attempt++)
                 {
                     var file = Paths[Random.Shared.Next(Paths.Length)];

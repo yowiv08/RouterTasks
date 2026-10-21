@@ -25,7 +25,8 @@ internal sealed class ScriptProbe(Func<int, bool, CancellationToken, Task<ProbeR
     private int _calls;
     public int Calls => Volatile.Read(ref _calls);
     public ConcurrentQueue<bool> Phases { get; } = [];
-    public async Task<ProbeResult> ProbeAsync(RunSnapshot run, bool heartbeat, string prompt, Func<int, Task<bool>> accepted, CancellationToken token)
+    public async Task<ProbeResult> ProbeAsync(RunSnapshot run, bool heartbeat, string prompt, Func<int, Task<bool>> accepted,
+        CancellationToken token, Func<ProxyPoolNode?, Task>? selected = null)
     {
         var index = Interlocked.Increment(ref _calls); Phases.Enqueue(heartbeat);
         var result = await next(index, heartbeat, token);

@@ -35,18 +35,14 @@ public sealed class ProtocolTests
     }
 
     [TestMethod]
-    public async Task ProxyPoolFailureNeverFallsBackToDirectOrRefundsAttempts()
+    public async Task MissingProxyServicesNeverFallsBackToDirectOrRefundsAttempts()
     {
         await using var f = new Fixture(); f.Site.Route = "pool"; await f.SeedAsync();
-        var pool = new Mock<IProxyPoolHttpClientFactory>();
-        pool.Setup(p => p.CreateClientAsync(It.IsAny<ProxyPoolHttpClientOptions>(), It.IsAny<CancellationToken>()))
-            .ThrowsAsync(new InvalidOperationException("代理池没有可用节点"));
-        f.Http.SetupGet(h => h.Pool).Returns(pool.Object);
         await f.Plugin.Engine.ActionAsync("task", "start"); await Fixture.Until(() => Task.FromResult(f.Plugin.Engine.ActiveCount == 0));
         var task = await f.TaskAsync(); Assert.AreEqual("failed", task.Runtime.Status); Assert.AreEqual(1L, task.Runtime.TotalAttempts);
-        StringAssert.Contains(task.Runtime.LastError!, "代理池没有可用节点");
+        StringAssert.Contains(task.Runtime.LastError!, NetworkClientFactory.ServicesUnavailableMessage);
         f.Http.Verify(h => h.CreateDirectClient(It.IsAny<PluginHttpClientOptions>()), Times.Never);
-        pool.Verify(p => p.CreateClientAsync(It.Is<ProxyPoolHttpClientOptions>(o => !o.AllowDirectFallback && !o.AllowAutoRedirect), It.IsAny<CancellationToken>()), Times.Once);
+        f.Http.VerifyGet(h => h.Pool, Times.Never);
     }
     [TestMethod]
     [DataRow(500, "Busy")]

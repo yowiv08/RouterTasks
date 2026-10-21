@@ -6,6 +6,7 @@
   const fields = form => form.elements;
   const displayClock = U.displayClock(), date = value => displayClock.format(value);
   let state = null, page = 'tasks', refreshing = false, bulkPending = false, timer, taskPage = 0, taskDraft, taskTemplate, siteDraft, detailId, detailOffset = 0;
+  let proxyCatalog = null, proxyCatalogError = '', proxyCatalogRequest = 0, proxyCatalogLoading = false;
   const selected = new Set();
   const qFields = [ ['concurrency','并发线程',1], ['maxAttemptsPerLane','每线程次数预算',1], ['intervalSeconds','排队间隔（秒）',.001], ['intervalMaxSeconds','随机间隔上限（可空）',.001], ['firstEventTimeoutSeconds','首事件超时（秒）',.001], ['responseTimeoutSeconds','完整响应总超时（秒）',.001], ['idleTimeoutSeconds','完整响应空闲超时（秒）',.001], ['maxResponseBytes','响应字节上限',1] ];
   const kFields = [ ['concurrency','并发线程',1], ['maxAttemptsPerLane','本阶段每线程预算（空为不限）',1], ['heartbeatSeconds','心跳间隔（秒）',.001], ['heartbeatMaxSeconds','随机心跳上限（可空）',.001], ['failureRetrySeconds','失败重试间隔（秒）',.001], ['firstEventTimeoutSeconds','首事件超时（秒）',.001], ['idleEvictionSeconds','失联窗口（秒）',.001], ['dropConfirmSeconds','掉线确认窗口（秒）',0], ['maxResponseBytes','响应字节上限',1] ];
@@ -37,6 +38,8 @@
   function options(select, values, value) { select.replaceChildren(...values.map(([id,label])=>{const opt=el('option',label);opt.value=id;return opt;})); if(value!=null)select.value=value; }
   function siteName(id){return state?.sites.find(s=>s.id===id)?.name||'站点已删除';}
   function keyName(id){return state?.keys.find(k=>k.id===id)?.alias||'账号';}
+  function networkLabel(value){return value?.lastProxy?.address?'代理 '+value.lastProxy.address:value?.lastRoute==='direct'?'直连':value?.lastRoute==='pool'?'代理池（尚未选定节点）':null;}
+  function laneLabel(lane){return '#'+lane.index+' · '+lane.status+' · '+lane.attempts+' 次 · '+(networkLabel(lane)?networkLabel(lane)+' · ':'')+(lane.lastError||date(lane.nextAttemptAt));}
   function pill(text,tone){return el('span',text,'pill '+tone);}
   async function refresh() {
     if(refreshing)return;refreshing=true;
@@ -107,8 +110,9 @@
       box.append(summary,quota);card.append(box);
       const info=el('div',undefined,'task-info');for(const [label,value]of [['下次请求',date(r.nextAttemptAt)],['上次成功',date(r.lastSuccessAt)]]){const item=el('div');item.append(el('small',label),document.createTextNode(value));info.append(item);}card.append(info);
       const http=el('div',undefined,'task-http');http.append(el('strong',r.lastHttpStatus?'HTTP '+r.lastHttpStatus:'等待请求'),el('span',r.matchedRule==='SSE accepted'?'SSE 已接受':r.matchedRule||'无匹配规则'));card.append(http);
+      if(networkLabel(r))card.append(el('div','最近请求：'+networkLabel(r),'task-network'));
       card.append(el('div','自动重排 '+(c.autoRequeue?'已开启':'已关闭'),'mode-label'));if(r.pauseReason||r.lastError)card.append(el('p',r.pauseReason||r.lastError,'task-error'));
-      if(task.totalLanes>1){const details=el('details',undefined,'lane-details');details.dataset.id=c.id+':lanes';details.open=open.has(details.dataset.id);details.append(el('summary','子线程 '+task.totalLanes+' 个'));for(const lane of r.lanes)details.append(el('p','#'+lane.index+' · '+lane.status+' · '+lane.attempts+' 次 · '+(lane.lastError||date(lane.nextAttemptAt)),'subtle'));if(task.totalLanes>8)details.append(el('p','更多线程请在详情中查看。','subtle'));card.append(details);}
+      if(task.totalLanes>1){const details=el('details',undefined,'lane-details');details.dataset.id=c.id+':lanes';details.open=open.has(details.dataset.id);details.append(el('summary','子线程 '+task.totalLanes+' 个'));for(const lane of r.lanes)details.append(el('p',laneLabel(lane),'subtle'));if(task.totalLanes>8)details.append(el('p','更多线程请在详情中查看。','subtle'));card.append(details);}
       const available=U.taskActions(task),running=available.action==='pause',actions=el('div',undefined,'card-actions');
       const edit=button('编辑',()=>openTask(c.id),'secondary task-edit');edit.disabled=running;edit.title=running?'请先暂停任务':'编辑账号';
       const logs=button('日志',()=>openDetail(c.id),'secondary task-logs');logs.title='日志统计';
@@ -116,7 +120,7 @@
       actions.append(edit,run,logs);
       const more=el('details',undefined,'task-more');more.dataset.id=c.id+':menu';more.open=open.has(more.dataset.id);more.append(el('summary','更多'));const menu=el('div',undefined,'menu-list');
       const add=(label,work,disabled=false,cls='')=>{const b=button(label,async()=>{more.open=false;await work();},cls);b.disabled=disabled;menu.append(b);};
-      add('复制账号',()=>openTask(c.id,true));add('查询模型 / 额度',async()=>{await post('keys/refresh',{id:c.keyId});await refresh();const updated=state.keys.find(k=>k.id===c.keyId),error=updated?.error||updated?.usageError;notice(error||'模型 / 额度已更新',Boolean(error));});add('导出账号',()=>exportAccount(c.id));add('立即重试',()=>taskAction([c.id],'retry'),!available.retry);add('手动重排',()=>taskAction([c.id],'requeue'),!available.requeue);if(available.action!=='restart')add('重新开始',()=>taskAction([c.id],'restart'));add('取消任务',()=>taskAction([c.id],'cancel'),!running);add('删除账号',async()=>{if(await ask('删除此账号及其任务、日志和通知配置？')){await post('accounts/delete',{id:c.id});selected.delete(c.id);await refresh();}},running,'danger');more.append(menu);actions.append(more);card.append(actions);$('taskList').append(card);
+      add('复制账号',()=>openTask(c.id,true));add('查询模型 / 额度',async()=>{await post('keys/refresh',{id:c.keyId});await refresh();const updated=state.keys.find(k=>k.id===c.keyId),error=updated?.error||updated?.usageError;notice((error||'模型 / 额度已更新')+(updated?.lastProxy?.address?' · 代理 '+updated.lastProxy.address:''),Boolean(error));});add('导出账号',()=>exportAccount(c.id));add('立即重试',()=>taskAction([c.id],'retry'),!available.retry);add('手动重排',()=>taskAction([c.id],'requeue'),!available.requeue);if(available.action!=='restart')add('重新开始',()=>taskAction([c.id],'restart'));add('取消任务',()=>taskAction([c.id],'cancel'),!running);add('删除账号',async()=>{if(await ask('删除此账号及其任务、日志和通知配置？')){await post('accounts/delete',{id:c.id});selected.delete(c.id);await refresh();}},running,'danger');more.append(menu);actions.append(more);card.append(actions);$('taskList').append(card);
     }
     $('taskPage').textContent=(taskPage+1)+' / '+Math.max(1,Math.ceil(tasks.length/50))+' · '+tasks.length+' 个账号';
     $('previousTasks').disabled=taskPage===0;$('nextTasks').disabled=(taskPage+1)*50>=tasks.length;
@@ -159,6 +163,9 @@
     f.siteId.value=siteDraft.id;f.keyId.value=taskDraft.keyId;f.siteRevision.value=siteDraft.revision;
     f.credentialVersion.value=duplicate||imported?'':detail?.credentialVersion??'';
     f.baseUrl.value=siteDraft.baseUrl;f.route.value=siteDraft.route;f.subscriptionIds.value=siteDraft.subscriptionIds.join(',');
+    proxyCatalogRequest++;proxyCatalogLoading=false;proxyCatalog=null;proxyCatalogError='';
+    f.proxySourceMode.value=siteDraft.subscriptionIds.length===0?'all':siteDraft.subscriptionIds.length===1&&siteDraft.subscriptionIds[0]==='manual'?'manual':'selected';
+    options(f.proxyId,[[siteDraft.proxyId||'',siteDraft.proxyId?'已保存节点 '+siteDraft.proxyId:'自动选择可用节点']],siteDraft.proxyId||'');
     f.token.value=detail?.token||'';
     const templateOptions=state.templates.map(t=>[t.id,t.name]);
     if(!templateOptions.some(t=>t[0]===taskDraft.templateId))templateOptions.push([taskDraft.templateId,'账号专用模板']);
@@ -181,7 +188,42 @@
     $('taskEditorTitle').textContent=taskId&&!duplicate?'编辑账号':'添加账号';
     $('requestEditor').open=true;editorPage('basic');$('taskDialog').showModal();
   }
-  function updateRoute(){$('subscriptionField').hidden=fields($('taskForm')).route.value!=='pool';}
+  function sourceIds(){return fields($('taskForm')).subscriptionIds.value.split(',').map(value=>value.trim()).filter(Boolean);}
+  function readNetwork(){
+    const f=fields($('taskForm')),subscriptionIds=sourceIds();
+    if(f.route.value==='pool'&&f.proxySourceMode.value==='selected'&&!subscriptionIds.length)throw Error('请选择至少一个代理来源');
+    return {route:f.route.value,subscriptionIds,proxyId:f.proxyId.value||null};
+  }
+  function proxySourceName(source){return proxyCatalog?.subscriptions.find(item=>item.id===source)?.name||(source==='manual'?'手动节点':source);}
+  function renderProxySelection(){
+    const f=fields($('taskForm')),requested=sourceIds(),fixed=f.proxyId.value,mode=f.proxySourceMode.value;
+    $('proxySubscriptions').hidden=mode!=='selected';$('proxySubscriptions').replaceChildren();
+    const sources=[...(proxyCatalog?.subscriptions||[])];
+    if(!sources.some(item=>item.id==='manual'))sources.push({id:'manual',name:'手动节点',enabled:true});
+    for(const source of requested)if(!sources.some(item=>item.id===source))sources.push({id:source,name:source,enabled:false,missing:true});
+    for(const source of sources){const label=el('label',undefined,'check'),check=el('input');check.type='checkbox';check.value=source.id;check.checked=requested.includes(source.id);check.dataset.proxySource=source.id;check.disabled=!source.enabled&&!check.checked;
+      check.addEventListener('change',()=>{f.subscriptionIds.value=[...$('proxySubscriptions').querySelectorAll('input:checked')].map(node=>node.value).join(',');renderProxySelection();});
+      label.append(check,document.createTextNode(source.name+(source.missing?'（已失效）':!source.enabled?'（已禁用）':'')));$('proxySubscriptions').append(label);}
+    const allowed=new Set(requested),inScope=node=>mode==='all'||allowed.has(node.subscriptionId),nodes=proxyCatalog?.nodes||[],nodeById=new Map(nodes.map(node=>[node.id,node]));
+    const visible=nodes.filter(inScope),values=[['','自动选择可用节点']];
+    for(const node of visible)values.push([node.id,node.address+' · '+proxySourceName(node.subscriptionId)+(node.available?'':'（不可用）')]);
+    const selected=nodeById.get(fixed);
+    if(fixed&&!visible.some(node=>node.id===fixed))values.push([fixed,(selected?.address||fixed)+(selected?'（不在所选来源）':proxyCatalog?'（节点已失效）':'（已保存节点）')]);
+    options(f.proxyId,values,fixed);
+    for(const option of f.proxyId.options)if(option.value&&option.value!==fixed)option.disabled=!nodeById.get(option.value)?.available;
+    const invalid=fixed&&proxyCatalog&&(!selected||!selected.available||!inScope(selected));
+    $('proxySelectionStatus').textContent=invalid?'所选节点当前不可用或不在来源范围，运行时将报错；请选择其他节点或调整来源。':fixed?'固定使用所选节点；节点不可用时请求停止。':'只使用所选范围内的可用节点。';
+    $('proxySelectionStatus').classList.toggle('proxy-warning',Boolean(invalid));
+    $('proxyCatalogStatus').textContent=proxyCatalogLoading?'正在读取代理列表…':proxyCatalogError?'读取失败：'+proxyCatalogError:proxyCatalog?visible.filter(node=>node.available).length+' 个可用节点':'';
+    $('refreshProxies').disabled=proxyCatalogLoading;
+  }
+  async function loadProxyCatalog(){
+    const request=++proxyCatalogRequest;proxyCatalogLoading=true;proxyCatalogError='';renderProxySelection();
+    try{const catalog=await get('network/proxies');if(request!==proxyCatalogRequest)return;proxyCatalog={subscriptions:catalog.subscriptions||[],nodes:catalog.nodes||[]};}
+    catch(error){if(request!==proxyCatalogRequest)return;proxyCatalogError=error.message;}
+    finally{if(request===proxyCatalogRequest){proxyCatalogLoading=false;renderProxySelection();}}
+  }
+  function updateRoute(){const pool=fields($('taskForm')).route.value==='pool';$('proxyFields').hidden=!pool;if(pool){renderProxySelection();if(!proxyCatalog&&!proxyCatalogLoading&&!proxyCatalogError)void loadProxyCatalog();}}
   function updatePromptSource(syncBody=false){
     const f=fields($('taskForm')),linux=f.promptSource.value==='linux';
     $('fixedPromptField').hidden=linux;f.prompt.disabled=linux;
@@ -235,7 +277,7 @@
   function readAccount(){
     const f=fields($('taskForm')),config=readTask();
     return {config,site:{...siteDraft,id:f.siteId.value,revision:Number(f.siteRevision.value),name:config.name,
-      baseUrl:f.baseUrl.value.trim(),route:f.route.value,subscriptionIds:f.subscriptionIds.value.split(',').map(s=>s.trim()).filter(Boolean),
+      baseUrl:f.baseUrl.value.trim(),...readNetwork(),
       queueHttpStatuses:config.queueHttpStatuses},token:f.token.value.trim(),
       credentialVersion:f.credentialVersion.value===''?null:Number(f.credentialVersion.value),
       expectedRevision:f.expectedRevision.value===''?null:Number(f.expectedRevision.value),
@@ -258,6 +300,7 @@
     const metrics=el('div',undefined,'metrics detail-metrics');
     metrics.append(metric('累计请求',r.totalAttempts,'send'),metric('首次进入',r.entered?1:0,'queue'),
       metric('恢复次数',r.recoveries,'layers'),metric('成功心跳',r.heartbeats,'pulse'));content.append(metrics);
+    if(networkLabel(r))content.append(el('p','最近请求：'+networkLabel(r),'task-network'));
     if(r.pauseReason||r.lastError)content.append(el('p',r.pauseReason||r.lastError,'task-error'));
     if(task.stats?.length){
       content.append(el('h3','每日统计'));const wrap=el('div',undefined,'table-scroll'),table=el('table'),head=el('tr');
@@ -271,7 +314,7 @@
     if(r.responseSummary)content.append(el('h3','响应摘要'),el('pre',r.responseSummary));
     if(r.lanes.length){
       content.append(el('h3','子线程'));
-      for(const lane of r.lanes)content.append(el('p','#'+lane.index+' · '+lane.status+' · '+lane.attempts+' 次 · '+(lane.lastError||date(lane.nextAttemptAt)),'subtle'));
+      for(const lane of r.lanes)content.append(el('p',laneLabel(lane),'subtle'));
       if(task.totalLanes>100){const pager=el('div',undefined,'actions'),prev=button('上一页线程',()=>openDetail(taskId,Math.max(0,offset-100))),next=button('下一页线程',()=>openDetail(taskId,offset+100));
         prev.disabled=offset===0;next.disabled=offset+100>=task.totalLanes;pager.append(prev,next);content.append(pager);}
     }
@@ -297,12 +340,11 @@
   $('queryAccount').addEventListener('click',()=>act($('queryAccount'),async()=>{
     const f=fields($('taskForm'));
     for(const field of [f.baseUrl,f.token])if(!field.checkValidity()){field.reportValidity();return;}
-    const connection=()=>({site:{...siteDraft,name:f.name.value.trim()||'账号',baseUrl:f.baseUrl.value.trim(),route:f.route.value,
-      subscriptionIds:f.subscriptionIds.value.split(',').map(s=>s.trim()).filter(Boolean)},token:f.token.value.trim()});
+    const connection=()=>({site:{...siteDraft,name:f.name.value.trim()||'账号',baseUrl:f.baseUrl.value.trim(),...readNetwork()},token:f.token.value.trim()});
     const input=connection(),accountId=f.id.value;const result=await post('accounts/query',input);
     if(f.id.value!==accountId||JSON.stringify(connection())!==JSON.stringify(input))return;
     $('modelOptions').replaceChildren(...(result.models||[]).map(m=>{const option=el('option');option.value=m;return option;}));
-    $('modelQueryStatus').textContent=(result.models?.length||0)+' 个模型 · 剩余额度 '+U.remaining(result)+(result.usageError?' · '+result.usageError:'');
+    $('modelQueryStatus').textContent=(result.models?.length||0)+' 个模型 · 剩余额度 '+U.remaining(result)+(result.lastProxy?.address?' · 代理 '+result.lastProxy.address:'')+(result.error?' · '+result.error:result.usageError?' · '+result.usageError:'');
   }));
   for(const node of document.querySelectorAll('[data-close]'))node.addEventListener('click',()=>$(node.dataset.close).close());
   for(const node of document.querySelectorAll('nav button'))node.addEventListener('click',()=>showPage(node.dataset.page));
@@ -314,6 +356,15 @@
   const taskFields=fields($('taskForm'));
   for(const name of ['mode','autoRequeue','unlimitedAttempts'])taskFields[name].addEventListener('change',updateMode);
   taskFields.route.addEventListener('change',updateRoute);
+  taskFields.proxySourceMode.addEventListener('change',()=>{
+    const mode=taskFields.proxySourceMode.value;
+    if(mode==='all')taskFields.subscriptionIds.value='';
+    else if(mode==='manual')taskFields.subscriptionIds.value='manual';
+    else if(!sourceIds().length)taskFields.subscriptionIds.value=(proxyCatalog?.subscriptions||[{id:'manual',enabled:true}]).filter(source=>source.enabled).map(source=>source.id).join(',');
+    renderProxySelection();
+  });
+  taskFields.proxyId.addEventListener('change',renderProxySelection);
+  $('refreshProxies').addEventListener('click',()=>void loadProxyCatalog());
   taskFields.promptSource.addEventListener('change',()=>updatePromptSource(true));
   for(const name of ['telegramEnabled','barkEnabled'])taskFields[name].addEventListener('change',updateNotifications);
   taskFields.templateId.addEventListener('change',async()=>{try{putTemplate(await get('templates/detail?id='+encodeURIComponent(taskFields.templateId.value)));updatePromptSource();}catch(error){notice(error.message,true);}});

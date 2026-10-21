@@ -220,6 +220,18 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
             for (var i = 0; i < count; i++) sources.Add(CancellationTokenSource.CreateLinkedTokenSource(token));
             using var decision = new SemaphoreSlim(1, 1);
             var winner = -1; ProbeResult? terminal = null;
+            static void RecordNetwork(TaskRecord task, int index, ProbeResult result)
+            {
+                if (result.Route is null) return;
+                task.Runtime.LastRoute = result.Route; task.Runtime.LastProxy = result.Proxy;
+                task.Runtime.Lanes[index].LastRoute = result.Route; task.Runtime.Lanes[index].LastProxy = result.Proxy;
+            }
+            static string NetworkDescription(ProbeResult result) => result.Route switch
+            {
+                "direct" => "直连",
+                "pool" when result.Proxy is { } proxy => $"代理 {proxy.Address}（{proxy.Id}）",
+                _ => "未取得出站节点"
+            };
             async Task<bool> AcceptAsync(int index, int status)
             {
                 await decision.WaitAsync(token);
@@ -278,13 +290,42 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
                         {
                             task.Runtime.TotalAttempts++;
                             var lane = task.Runtime.Lanes[index]; lane.Attempts++; lane.Status = "requesting"; lane.NextAttemptAt = null;
+                            lane.LastRoute = null; lane.LastProxy = null;
                             (queue ? task.Runtime.QueueLaneAttempts : task.Runtime.KeepaliveLaneAttempts)[lane.Index] = lane.Attempts;
                             TaskStore.AddEvent(document, task, clock.Now, "attempt", $"第 {task.Runtime.QueueRound} 轮 / 线程 {index + 1} / 第 {lane.Attempts} 次（发送前计数）", index + 1);
                         });
                         laneToken.ThrowIfCancellationRequested();
-                        var result = await probes.ProbeAsync(active.Snapshot, !queue, actualPrompt, status => AcceptAsync(index, status), laneToken);
+                        var networkRecorded = false;
+                        var result = await probes.ProbeAsync(active.Snapshot, !queue, actualPrompt, status => AcceptAsync(index, status), laneToken,
+                            async proxy =>
+                            {
+                                await decision.WaitAsync(laneToken);
+                                try
+                                {
+                                    laneToken.ThrowIfCancellationRequested();
+                                    if (winner >= 0 || terminal is not null)
+                                    { await sources[index].CancelAsync(); laneToken.ThrowIfCancellationRequested(); }
+                                    var selection = new ProbeResult(ProbeKind.Lost, Proxy: proxy, Route: active.Snapshot.Site.Route);
+                                    await ChangeAsync(active, (document, task) =>
+                                    {
+                                        RecordNetwork(task, index, selection);
+                                        TaskStore.AddEvent(document, task, clock.Now, "network", "请求出站：" + NetworkDescription(selection), index + 1);
+                                    });
+                                    networkRecorded = true;
+                                }
+                                finally { decision.Release(); }
+                            });
+                        laneToken.ThrowIfCancellationRequested();
                         if (result.Error is not null) result = result with { Error = TextOutput.Summary(result.Error) };
-                        if (result.Kind == ProbeKind.Accepted) return result;
+                        if (result.Kind == ProbeKind.Accepted)
+                        {
+                            if (!networkRecorded && result.Route is not null) await ChangeAsync(active, (document, task) =>
+                            {
+                                RecordNetwork(task, index, result);
+                                TaskStore.AddEvent(document, task, clock.Now, "network", "实际出站：" + NetworkDescription(result), index + 1);
+                            });
+                            return result;
+                        }
                         if (result.Kind == ProbeKind.Lost) return result;
                         await decision.WaitAsync(token);
                         try
@@ -296,7 +337,9 @@ internal sealed class TaskEngine(TaskStore store, IProbeClient probes, IRuntimeC
                                 task.Runtime.LastError = result.Error;
                                 task.Runtime.MatchedRule = result.Kind == ProbeKind.Busy ? $"HTTP {result.Status}" : result.Kind.ToString();
                                 task.Runtime.Lanes[index].LastError = result.Error;
-                                TaskStore.AddEvent(document, task, clock.Now, "request-failed", result.Error ?? result.Kind.ToString(), index + 1);
+                                RecordNetwork(task, index, result);
+                                var network = result.Route is null ? "" : $"；实际出站：{NetworkDescription(result)}";
+                                TaskStore.AddEvent(document, task, clock.Now, "request-failed", (result.Error ?? result.Kind.ToString()) + network, index + 1);
                             });
                         }
                         finally { decision.Release(); }

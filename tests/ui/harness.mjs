@@ -18,7 +18,7 @@ export async function fixtureData() {
   templates[0].body = templates[0].body.replace(/}$/, ',"unknown":{"id":9007199254740993123456789,"decimal":1.0000000000000000000001}}');
   const settings = { maxEventsPerTask:200, summaryBytes:8192, historyDays:30, telegramEnabled:false, barkEnabled:false,
     barkServer:'https://api.day.app', notificationMaxAttempts:10, notificationRetrySeconds:5, notificationMaxRetrySeconds:3600, maxNotificationRecords:1000 };
-  return { version:'0.3.1', revision:1, sites:[{id:'site',name:'模拟站点',baseUrl:'http://127.0.0.1',route:'direct',subscriptionIds:[],queueHttpStatuses:[500],revision:1}],
+  return { version:'0.3.2', revision:1, sites:[{id:'site',name:'模拟站点',baseUrl:'http://127.0.0.1',route:'direct',subscriptionIds:[],queueHttpStatuses:[500],revision:1}],
     keys:[{id:'key',siteId:'site',alias:'模拟账号',token:'TOKEN-fixture-only',credentialVersion:1,authStatus:'unchecked',models:['MODEL'],usedUsd:null,limitUsd:null}],
     templates, tasks:[], stats:[], notifications:[], settings, activeCount:0, accountSecrets:{}, notificationCredentials:{telegramConfigured:false,barkConfigured:false,credentialVersion:0} };
 }
@@ -36,10 +36,11 @@ export function controller(data) {
     calls.push({method,path,body:clone(body)});
     const [route,query] = path.split('?'), params = new URLSearchParams(query);
     if (method === 'GET' && route === 'state') return clone({...data, templates:data.templates.map(({id,name,protocol,path})=>({id,name,protocol,path}))});
+    if (method === 'GET' && route === 'network/proxies') {if(data.proxyCatalogError)throw Error(data.proxyCatalogError);return clone(data.proxyCatalog||{subscriptions:[{id:'manual',name:'手动节点',enabled:true}],nodes:[]});}
     if (route === 'templates/detail') return clone(data.templates.find(t=>t.id===params.get('id')));
     if (route === 'tasks/detail') {const id=params.get('id'),task=data.tasks.find(t=>t.config.id===id);return clone({...task,serverNow:data.serverNow,events:task.events||[],stats:data.stats.filter(s=>s.taskId===id),notifications:data.notifications.filter(n=>n.taskId===id)});}
     if (route === 'accounts/detail') return accountDetail(params.get('id'));
-    if (route === 'accounts/query') return {models:['MODEL-A','MODEL-B'],authStatus:'ready',usedUsd:1,limitUsd:10,unlimited:false};
+    if (route === 'accounts/query') return {models:['MODEL-A','MODEL-B'],authStatus:'ready',usedUsd:1,limitUsd:10,unlimited:false,...clone(data.queryResult||{})};
     if (route === 'accounts/save') {
       const old=data.tasks.find(t=>t.config.id===body.config.id);
       if(old&&old.configRevision!==body.expectedRevision)throw Error('账号配置已更新');

@@ -59,7 +59,7 @@ public sealed class NotificationLifecycleTests
         var terminal = assembly.GetType("Plugins.RouterTasks.RouterTasksTerminal")!;
         var clock = Activator.CreateInstance(assembly.GetType("Plugins.RouterTasks.RuntimeClock")!, nonPublic: true);
         var constructor = terminal.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single();
-        var plugin = constructor.Invoke([fixture.Services.Object, fixture.Directory, clock, null]);
+        var plugin = constructor.Invoke([fixture.Services.Object, fixture.Directory, clock, null, null]);
         try
         {
             async Task<JsonElement> Call(string method, object? body = null)

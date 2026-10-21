@@ -15,8 +15,9 @@ namespace Plugins.RouterTasks;
 [ModelCache(Disabled = true)]
 public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModule, IPluginMainPageProvider
 {
-    public const string Version = "0.3.1";
+    public const string Version = "0.3.2";
     private readonly IPluginServices _host;
+    private readonly NetworkClientFactory _network;
     private readonly CredentialVault _vault;
     private readonly SourcePromptService _sources;
     private readonly NotificationService _notifications;
@@ -29,15 +30,16 @@ public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModu
 
     public RouterTasksTerminal(IPluginHost host) : this(host.Services,
         Environment.GetEnvironmentVariable("ROUTER2API_ROUTERTASKS_DATA_DIR")
-            ?? Path.Combine(AppContext.BaseDirectory, "data", "plugins", "router-tasks"), new RuntimeClock()) { }
+            ?? Path.Combine(AppContext.BaseDirectory, "data", "plugins", "router-tasks"), new RuntimeClock(), serviceHost: host) { }
 
-    internal RouterTasksTerminal(IPluginServices services, string directory, IRuntimeClock clock, IProbeClient? probe = null)
+    internal RouterTasksTerminal(IPluginServices services, string directory, IRuntimeClock clock, IProbeClient? probe = null, IPluginHost? serviceHost = null)
     {
         _host = services; _clock = clock;
+        _network = new NetworkClientFactory(services.Http, serviceHost);
         Store = new TaskStore(directory, TemplateRenderer.Presets, clock);
         _vault = new CredentialVault(services.Accounts);
-        _sources = new SourcePromptService(Store, services.Http, clock);
-        Engine = new TaskEngine(Store, probe ?? new HttpProbeClient(services.Http, clock), clock, ResolveAsync, _sources.GetAsync);
+        _sources = new SourcePromptService(Store, _network, clock);
+        Engine = new TaskEngine(Store, probe ?? new HttpProbeClient(_network, clock), clock, ResolveAsync, _sources.GetAsync);
         _notifications = new NotificationService(Store, _vault, services.Http, clock);
     }
     public void Configure(IPluginBuilder builder) => builder.ProxyPolicy(policy => policy.MaxAttempts(1));
@@ -187,7 +189,8 @@ public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModu
     private async Task<KeyInfo> QueryKeyAsync(KeyInfo key, SiteConfig site, string secret, CancellationToken token)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token, _httpShutdown.Token); timeout.CancelAfter(TimeSpan.FromSeconds(20));
-        using var client = await HttpProbeClient.CreateClientAsync(_host.Http, site, timeout.Token);
+        key.LastRoute = site.Route; key.LastProxy = null;
+        using var client = await _network.CreateClientAsync(site, timeout.Token, proxy => key.LastProxy = proxy);
         async Task<JsonNode?> Get(string path)
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, Validation.Endpoint(site.BaseUrl, path));
@@ -203,6 +206,7 @@ public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModu
             key.Models = models?["data"]?.AsArray().Select(model => model?["id"]?.ToString()).Where(id => !string.IsNullOrEmpty(id)).Select(id => id!).Distinct().ToArray() ?? [];
             key.AuthStatus = "ready"; key.Error = null;
         }
+        catch (OperationCanceledException) when (token.IsCancellationRequested || _httpShutdown.IsCancellationRequested) { throw; }
         catch (Exception error) when (error is HttpRequestException or IOException or OperationCanceledException or JsonException or InvalidOperationException)
         { key.AuthStatus = "error"; key.Error = TextOutput.Summary(error.Message); }
         if (key.AuthStatus == "ready")
@@ -219,9 +223,11 @@ public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModu
                     key.LimitUsd = subscription?["hard_limit_usd"]?.GetValue<decimal>() ?? throw new FormatException("额度响应缺少 hard_limit_usd；保留旧读数");
                     key.Unlimited = key.LimitUsd == 100_000_000m;
                 }
+                catch (OperationCanceledException) when (token.IsCancellationRequested || _httpShutdown.IsCancellationRequested) { throw; }
                 catch (Exception error) when (error is HttpRequestException or IOException or OperationCanceledException or JsonException or InvalidOperationException or FormatException)
                 { key.UsageError = TextOutput.Summary(error.Message); }
             }
+            catch (OperationCanceledException) when (token.IsCancellationRequested || _httpShutdown.IsCancellationRequested) { throw; }
             catch (Exception error) when (error is HttpRequestException or IOException or OperationCanceledException or JsonException or InvalidOperationException or FormatException)
             { key.UsageError = TextOutput.Summary(error.Message); }
         }
@@ -390,6 +396,7 @@ public sealed partial class RouterTasksTerminal : IPlatformTerminal, IPluginModu
         }
         catch (ConflictException error) { return DetachResponse(context.Json(409, new { error = error.Message })); }
         catch (KeyNotFoundException error) { return DetachResponse(context.Json(404, new { error = error.Message })); }
+        catch (ProxySelectionException error) { return DetachResponse(context.Json(503, new { error = error.Message, code = "proxy_unavailable" })); }
         catch (Exception error) when (error is FormatException or JsonException or ArgumentException)
         { return DetachResponse(context.BadRequest(TextOutput.Summary(error.Message))); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
