@@ -34,6 +34,11 @@ Object.assign(data.tasks[1].runtime,{lastRoute:'pool',lastProxy:manualProxy});
 Object.assign(data.tasks[0].runtime.lanes[0],{lastRoute:'pool',lastProxy:subscriptionProxy});
 data.activeCount=3;
 data.stats=[{taskId:'task1',day:now.slice(0,10),protocol:'responses',entered:3,recoveries:2,heartbeats:41}];
+data.usageResults={task1:{queriedAt:now,lastRoute:'pool',lastProxy:manualProxy,items:Array.from({length:51},(_,index)=>({
+  id:String(index),at:'2026-10-22T00:00:00Z',type:index===50?5:2,modelName:'usage-model-'+index,
+  tokenName:'浏览器模拟令牌',quota:index===50?null:12500,promptTokens:120,completionTokens:30,useTime:4,isStream:true,
+  group:'default',content:index===0?'长日志内容 '+('x'.repeat(420)):'usage-content-'+index,other:'{"cache_tokens":10}'
+}))}};
 const bridge=`<script>(()=>{let n=0;const pending=new Map();addEventListener('message',e=>{if(e.data?.type!=='router2api-response')return;const p=pending.get(e.data.id);if(!p)return;pending.delete(e.data.id);e.data.ok?p.resolve(e.data.body):p.reject(Error(e.data.error));});window.Router2API={request:(method,route,body)=>new Promise((resolve,reject)=>{const id=String(++n);pending.set(id,{resolve,reject});parent.postMessage({type:'router2api-request',id,method,route,body},'*');})};})();</script>`;
 const html=(await pageHtml()).replace('<head>',()=>'<head>'+bridge);
 const wrapper=`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0}iframe{width:100%;height:100vh;border:0;display:block}</style></head><body>
@@ -286,9 +291,46 @@ try {
   await actionCard.getByRole('button',{name:'继续任务',exact:true}).waitFor();await clickTaskAction('resume');
   assert.equal(data.tasks.find(task=>task.config.id==='task2').runtime.totalAttempts,2);
   checks.push('保活预算耗尽显示重新开始，编辑增加预算后点击继续发送 resume 并保留已用次数');
+  const usageCalls=()=>api.calls.filter(call=>call.path==='accounts/usage-logs');
+  const usageCard=frame.locator('.task-card[data-id="task1"]');
+  await usageCard.locator('.task-more summary').click();await usageCard.getByRole('button',{name:'使用日志',exact:true}).click();
+  await frame.locator('#usageDialog[aria-busy=false]').waitFor();
+  assert.deepEqual(usageCalls().at(-1).body,{id:'task1'});
+  assert.equal(await frame.locator('#usageContent tbody tr').count(),50);
+  assert.match(await frame.locator('#usageStatus').innerText(),/代理.*18080/);
+  assert.equal(await frame.locator('#usageContent tbody td').first().innerText(),'2026/10/22 08:00:00');
+  await page.screenshot({path:resolve(out,'usage-desktop.png')});
+  await frame.locator('#nextUsage').click();assert.equal(await frame.locator('#usageContent tbody tr').count(),1);
+  await frame.locator('#usageSearch').fill('usage-model-0');assert.equal(await frame.locator('#usageContent tbody tr').count(),1);
+  await frame.locator('#usageType').selectOption('5');assert.match(await frame.locator('#usageContent').innerText(),/没有匹配/);
+  await frame.locator('#usageSearch').fill('');assert.equal(await frame.locator('#usageContent tbody tr').count(),1);
+  assert.equal(usageCalls().length,1);checks.push('使用日志管理桥仅传账号 ID，最近记录分页、搜索和类型筛选在本地执行');
+  await frame.locator('#usageType').selectOption('');
+  const usageLayouts=[];
+  for(const viewport of [{width:1440,height:1100},{width:390,height:844}]){
+    await page.setViewportSize(viewport);
+    const layout=await frame.locator('#usageDialog').evaluate(node=>({dialogOverflow:node.scrollWidth-node.clientWidth,
+      pageOverflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,
+      width:node.getBoundingClientRect().width,tableWidth:node.querySelector('.usage-table').clientWidth}));
+    assert.ok(layout.dialogOverflow<=1&&layout.pageOverflow<=1,JSON.stringify({viewport,layout}));
+    await frame.locator('#usageContent details').first().evaluate(node=>node.open=true);
+    await page.screenshot({path:resolve(out,'usage-'+viewport.width+'.png')});usageLayouts.push({viewport,...layout});
+  }
+  checks.push('使用日志桌面与 390px 移动端无横向溢出，长详情在表格内滚动');
+  await page.setViewportSize({width:1440,height:1100});
+  data.usageError='模拟站点不支持使用日志';
+  await frame.locator('#refreshUsage').click();await frame.locator('#usageError').getByText('模拟站点不支持使用日志',{exact:true}).waitFor();
+  data.usageError='';data.usageResults.task1.items=[];
+  await frame.locator('#refreshUsage').click();await frame.locator('#usageContent').getByText('站点暂无使用日志',{exact:true}).waitFor();
+  await frame.locator('#usageDialog [data-close=usageDialog]').click();
+  await usageCard.locator('.task-logs').click();await frame.locator('#detailDialog').waitFor({state:'visible'});
+  await frame.locator('#detailContent').getByRole('button',{name:'使用日志',exact:true}).click();
+  await frame.locator('#usageDialog[aria-busy=false]').waitFor();assert.deepEqual(usageCalls().at(-1).body,{id:'task1'});
+  await frame.locator('#usageDialog [data-close=usageDialog]').click();await frame.locator('#detailDialog [data-close=detailDialog]').click();
+  checks.push('日志统计可以打开使用日志，查询错误可重试且空记录有独立提示');
   assert.deepEqual(errors,[]);assert.deepEqual(blocked,[]);
   assert.ok(api.calls.some(c=>c.path==='tasks/action'&&c.body.action==='restart'));
   checks.push('浏览器运行无错误');
-  await writeFile(resolve(out,'browser-report.json'),JSON.stringify({at:new Date().toISOString(),browser:browser.version(),checks,laneLayouts,errors,blocked,scope:'本机模拟管理桥；与宿主一致的 iframe sandbox，未连接真实上游'},null,2));
+  await writeFile(resolve(out,'browser-report.json'),JSON.stringify({at:new Date().toISOString(),browser:browser.version(),checks,laneLayouts,usageLayouts,errors,blocked,scope:'本机模拟管理桥；与宿主一致的 iframe sandbox，未连接真实上游'},null,2));
   console.log(JSON.stringify({passed:checks.length,out,checks},null,2));
 } finally {await browser?.close();await new Promise(r=>server.close(r));}

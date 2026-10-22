@@ -5,7 +5,9 @@
   const id = () => crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, '0')).join('');
   const fields = form => form.elements;
   const displayClock = U.displayClock(), date = value => displayClock.format(value);
+  const usageClock = U.displayClock(), usageNumber = value => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString('zh-CN', {maximumFractionDigits:8}) : '—';
   let state = null, page = 'tasks', refreshing = false, bulkPending = false, timer, taskPage = 0, taskDraft, taskTemplate, siteDraft, detailId, detailOffset = 0;
+  let usageId = null, usageRequest = 0, usageLoading = false, usageResult = null, usageError = '', usagePage = 0;
   let proxyCatalog = null, proxyCatalogError = '', proxyCatalogRequest = 0, proxyCatalogLoading = false;
   const selected = new Set();
   const qFields = [ ['concurrency','并发线程',1], ['maxAttemptsPerLane','每线程次数预算',1], ['intervalSeconds','排队间隔（秒）',.001], ['intervalMaxSeconds','随机间隔上限（可空）',.001], ['firstEventTimeoutSeconds','首事件超时（秒）',.001], ['responseTimeoutSeconds','完整响应总超时（秒）',.001], ['idleTimeoutSeconds','完整响应空闲超时（秒）',.001], ['maxResponseBytes','响应字节上限',1] ];
@@ -120,7 +122,7 @@
       actions.append(edit,run,logs);
       const more=el('details',undefined,'task-more');more.dataset.id=c.id+':menu';more.open=open.has(more.dataset.id);more.append(el('summary','更多'));const menu=el('div',undefined,'menu-list');
       const add=(label,work,disabled=false,cls='')=>{const b=button(label,async()=>{more.open=false;await work();},cls);b.disabled=disabled;menu.append(b);};
-      add('复制账号',()=>openTask(c.id,true));add('查询模型 / 额度',async()=>{await post('keys/refresh',{id:c.keyId});await refresh();const updated=state.keys.find(k=>k.id===c.keyId),error=updated?.error||updated?.usageError;notice((error||'模型 / 额度已更新')+(updated?.lastProxy?.address?' · 代理 '+updated.lastProxy.address:''),Boolean(error));});add('导出账号',()=>exportAccount(c.id));add('立即重试',()=>taskAction([c.id],'retry'),!available.retry);add('手动重排',()=>taskAction([c.id],'requeue'),!available.requeue);if(available.action!=='restart')add('重新开始',()=>taskAction([c.id],'restart'));add('取消任务',()=>taskAction([c.id],'cancel'),!running);add('删除账号',async()=>{if(await ask('删除此账号及其任务、日志和通知配置？')){await post('accounts/delete',{id:c.id});selected.delete(c.id);await refresh();}},running,'danger');more.append(menu);actions.append(more);card.append(actions);$('taskList').append(card);
+      add('复制账号',()=>openTask(c.id,true));add('查询模型 / 额度',async()=>{await post('keys/refresh',{id:c.keyId});await refresh();const updated=state.keys.find(k=>k.id===c.keyId),error=updated?.error||updated?.usageError;notice((error||'模型 / 额度已更新')+(updated?.lastProxy?.address?' · 代理 '+updated.lastProxy.address:''),Boolean(error));});add('使用日志',()=>openUsage(c.id));add('导出账号',()=>exportAccount(c.id));add('立即重试',()=>taskAction([c.id],'retry'),!available.retry);add('手动重排',()=>taskAction([c.id],'requeue'),!available.requeue);if(available.action!=='restart')add('重新开始',()=>taskAction([c.id],'restart'));add('取消任务',()=>taskAction([c.id],'cancel'),!running);add('删除账号',async()=>{if(await ask('删除此账号及其任务、日志和通知配置？')){await post('accounts/delete',{id:c.id});selected.delete(c.id);await refresh();}},running,'danger');more.append(menu);actions.append(more);card.append(actions);$('taskList').append(card);
     }
     $('taskPage').textContent=(taskPage+1)+' / '+Math.max(1,Math.ceil(tasks.length/50))+' · '+tasks.length+' 个账号';
     $('previousTasks').disabled=taskPage===0;$('nextTasks').disabled=(taskPage+1)*50>=tasks.length;
@@ -291,7 +293,7 @@
     $('detailTitle').textContent=task.config.name+' · 日志统计';
     const content=$('detailContent');content.replaceChildren();const status=U.status(task),r=task.runtime;
     const controls=el('div',undefined,'actions');
-    controls.append(pill(status.label,status.tone),button('刷新日志',()=>openDetail(taskId,detailOffset),'ghost'));
+    controls.append(pill(status.label,status.tone),button('刷新日志',()=>openDetail(taskId,detailOffset),'ghost'),button('使用日志',()=>openUsage(taskId),'secondary'));
     const notifications=task.notifications||[];
     if(notifications.some(n=>n.state==='paused'))controls.append(button('恢复通知投递',async()=>{
       if(await ask('恢复此账号的通知投递？已送达但未确认的通知可能重复。')){await post('notifications/resume',{id:taskId});await openDetail(taskId,detailOffset);}
@@ -326,6 +328,61 @@
     const details=el('details');details.append(el('summary','账号配置 JSON'),el('pre',JSON.stringify(task.config,null,2)));content.append(details);
     if(!$('detailDialog').open)$('detailDialog').showModal();
   }
+  function usageType(type){return type===2?'消费':type==null?'未知类型':'类型 '+type;}
+  function usageTotal(items,field){const values=items.map(item=>item[field]).filter(value=>typeof value==='number'&&Number.isFinite(value));return values.length?values.reduce((sum,value)=>sum+value,0):null;}
+  function resetUsage(){usageRequest++;usageId=null;usageLoading=false;usageResult=null;usageError='';usagePage=0;}
+  function closeUsage(){resetUsage();$('usageDialog').close();}
+  async function openUsage(taskId){
+    if(usageId===taskId&&$('usageDialog').open)return;
+    usageRequest++;usageId=taskId;usageLoading=false;usageResult=null;usageError='';usagePage=0;
+    $('usageTitle').textContent=(state.tasks.find(task=>task.config.id===taskId)?.config.name||'账号')+' · 使用日志';
+    $('usageSearch').value='';options($('usageType'),[['','全部类型']]);
+    if(!$('usageDialog').open)$('usageDialog').showModal();
+    await loadUsage();
+  }
+  async function loadUsage(){
+    if(!usageId||usageLoading)return;
+    const accountId=usageId,request=++usageRequest;
+    usageLoading=true;usageResult=null;usageError='';usagePage=0;renderUsage();
+    try{
+      const result=await post('accounts/usage-logs',{id:accountId});
+      if(request!==usageRequest||usageId!==accountId||!$('usageDialog').open)return;
+      usageResult={...result,items:Array.isArray(result.items)?result.items:[]};
+      const selectedType=$('usageType').value,types=[...new Set(usageResult.items.map(item=>item.type==null?'unknown':String(item.type)))];
+      types.sort((a,b)=>a==='unknown'?1:b==='unknown'?-1:Number(a)-Number(b));
+      options($('usageType'),[['','全部类型'],...types.map(type=>[type,usageType(type==='unknown'?null:Number(type))])],types.includes(selectedType)?selectedType:'');
+    }catch(error){if(request===usageRequest&&usageId===accountId&&$('usageDialog').open)usageError=error.message;}
+    finally{if(request===usageRequest&&usageId===accountId&&$('usageDialog').open){usageLoading=false;renderUsage();}}
+  }
+  function renderUsage(){
+    const items=usageResult?.items||[],query=$('usageSearch').value.trim().toLowerCase(),type=$('usageType').value;
+    const filtered=items.filter(item=>(!type||(item.type==null?'unknown':String(item.type))===type)&&`${item.modelName||''} ${item.content||''}`.toLowerCase().includes(query));
+    usagePage=Math.min(usagePage,Math.max(0,Math.ceil(filtered.length/50)-1));
+    $('usageDialog').setAttribute('aria-busy',String(usageLoading));$('refreshUsage').disabled=usageLoading;
+    $('usageSearch').disabled=$('usageType').disabled=usageLoading||!usageResult;
+    $('usageError').textContent=usageError;$('usageStatus').textContent=usageLoading?'正在查询站点使用日志…':usageResult?'已返回 '+items.length+' 条 · 查询时间 '+date(usageResult.queriedAt)+(networkLabel(usageResult)?' · '+networkLabel(usageResult):''):usageError?'查询失败，可点击刷新重试。':'';
+    const metrics=$('usageMetrics');metrics.replaceChildren();
+    if(usageResult){const consumed=items.filter(item=>item.type===2);for(const [title,value]of [['消费记录',consumed.length],['输入 Token',usageTotal(consumed,'promptTokens')],['输出 Token',usageTotal(consumed,'completionTokens')],['消耗额度',usageTotal(consumed,'quota')]])metrics.append(metric(title,usageNumber(value),'send'));}
+    $('usageSummaryNote').hidden=!usageResult;
+    const content=$('usageContent');content.replaceChildren();
+    if(!filtered.length){content.append(el('p',usageLoading?'正在加载…':usageError?'暂无查询结果':usageResult?(items.length?'没有匹配的记录':'站点暂无使用日志'):'暂无查询结果','usage-empty'));}
+    else{
+      const wrap=el('div',undefined,'table-scroll usage-table'),table=el('table'),head=el('tr'),thead=el('thead'),body=el('tbody');
+      for(const title of ['时间（UTC+8）','类型','模型 / 令牌','输入 Token','输出 Token','额度','用时 / 流式','详情'])head.append(el('th',title));thead.append(head);table.append(thead);
+      for(const item of filtered.slice(usagePage*50,(usagePage+1)*50)){
+        const row=el('tr');row.append(el('td',usageClock.format(item.at)),el('td',usageType(item.type)));
+        const model=el('td',item.modelName||'—');if(item.tokenName)model.append(el('small',item.tokenName));row.append(model);
+        for(const field of ['promptTokens','completionTokens','quota'])row.append(el('td',usageNumber(item[field])));
+        const timing=el('td',item.useTime==null?'—':usageNumber(item.useTime)+' 秒');timing.append(el('small',item.isStream===true?'流式':item.isStream===false?'非流式':'流式未知'));row.append(timing);
+        const detail=el('td'),panel=el('details');panel.append(el('summary','查看详情'));
+        for(const [title,value]of [['记录 ID',item.id],['分组',item.group],['内容',item.content],['其他',item.other]])if(value!=null&&value!=='')panel.append(el('strong',title),el('pre',typeof value==='string'?value:JSON.stringify(value,null,2)));
+        if(panel.children.length===1)panel.append(el('p','暂无附加内容','subtle'));detail.append(panel);row.append(detail);body.append(row);
+      }
+      table.append(body);wrap.append(table);content.append(wrap);
+    }
+    $('usagePage').textContent=(usagePage+1)+' / '+Math.max(1,Math.ceil(filtered.length/50))+' · '+filtered.length+' 条记录';
+    $('previousUsage').disabled=usageLoading||usagePage===0;$('nextUsage').disabled=usageLoading||(usagePage+1)*50>=filtered.length;
+  }
   async function exportAccount(taskId){
     const config=await get('accounts/export?id='+encodeURIComponent(taskId));
     $('exportText').value=JSON.stringify(config,null,2);$('exportDialog').showModal();
@@ -346,7 +403,12 @@
     $('modelOptions').replaceChildren(...(result.models||[]).map(m=>{const option=el('option');option.value=m;return option;}));
     $('modelQueryStatus').textContent=(result.models?.length||0)+' 个模型 · 剩余额度 '+U.remaining(result)+(result.lastProxy?.address?' · 代理 '+result.lastProxy.address:'')+(result.error?' · '+result.error:result.usageError?' · '+result.usageError:'');
   }));
-  for(const node of document.querySelectorAll('[data-close]'))node.addEventListener('click',()=>$(node.dataset.close).close());
+  for(const node of document.querySelectorAll('[data-close]'))node.addEventListener('click',()=>node.dataset.close==='usageDialog'?closeUsage():$(node.dataset.close).close());
+  $('usageDialog').addEventListener('cancel',event=>{event.preventDefault();closeUsage();});
+  $('usageDialog').addEventListener('close',()=>{if(!$('usageDialog').open)resetUsage();});
+  $('refreshUsage').addEventListener('click',()=>void loadUsage());
+  $('usageSearch').addEventListener('input',()=>{usagePage=0;renderUsage();});$('usageType').addEventListener('change',()=>{usagePage=0;renderUsage();});
+  $('previousUsage').addEventListener('click',()=>{usagePage--;renderUsage();});$('nextUsage').addEventListener('click',()=>{usagePage++;renderUsage();});
   for(const node of document.querySelectorAll('nav button'))node.addEventListener('click',()=>showPage(node.dataset.page));
   for(const node of document.querySelectorAll('[data-bulk]'))node.addEventListener('click',()=>bulkAction(node.dataset.bulk));
   $('selectAll').addEventListener('change',()=>{for(const task of filteredTasks().slice(taskPage*50,(taskPage+1)*50))$('selectAll').checked?selected.add(task.config.id):selected.delete(task.config.id);renderTasks();});

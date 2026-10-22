@@ -2,8 +2,8 @@
   <PropertyGroup>
     <RootNamespace>Plugins.RouterTasks</RootNamespace>
     <AssemblyName>Plugins.RouterTasks</AssemblyName>
-    <Version>0.3.2</Version>
-    <Description>可配置 HTTP 排队、持续保活、自动重排、任务管理与 Telegram/Bark 通知。</Description>
+    <Version>0.3.3</Version>
+    <Description>可配置 HTTP 排队、持续保活、自动重排、站点使用日志与 Telegram/Bark 通知。</Description>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Router.Contracts" Version="2.0.0" />

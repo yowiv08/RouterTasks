@@ -14,6 +14,7 @@
 | POST | accounts/save | 统一保存账号连接、请求参数、通知和日志设置 |
 | POST | accounts/preview | 展开完整请求内容 |
 | POST | accounts/query | 使用当前站点地址和 API Key 查询模型与额度 |
+| POST | accounts/usage-logs | 使用保存的账号凭据读取站点最近 Token 使用日志 |
 | POST | accounts/delete | 删除账号及其任务、日志和通知配置 |
 | GET | accounts/export?id=ID | 导出包含完整凭据和模板的账号 JSON |
 | GET | tasks/detail?id=ID&laneOffset=0 | 账号任务的快照、日志、每日统计、通知与分页线程状态 |
@@ -30,6 +31,35 @@
 `GET network/proxies` 返回 `subscriptions:[{id,name,enabled}]` 与 `nodes:[{id,subscriptionId,address,state,available}]`。目录中的不可用节点仅供显示现有选择；实际发送再次核验来源、状态及冷却窗口。固定节点不在范围内或没有可用节点时返回 503、`code=proxy_unavailable`，不会切换范围外节点或直连。代理服务缺失同样明确报错，不依赖旧版回退。
 
 模型/额度查询、任务运行快照与源码获取共用选择规则。一次模型/额度查询的多个 GET 共用同一节点和客户端。`KeyInfo`、`runtime`、`runtime.lanes[]` 的 `lastRoute`、`lastProxy` 保存实际出站；尚未取得节点时为 `null`。直连时 `lastRoute=direct`、`lastProxy=null`。日志记录安全节点摘要，完整代理凭据始终留在宿主。
+
+### 站点使用日志
+
+`POST accounts/usage-logs` 请求体：
+
+```json
+{"id":"account-1"}
+```
+
+后端读取账号的站点、API Key 和代理配置，发送 `GET /api/log/token?key=<完整 API Key>` 及 `Authorization: Bearer <完整 API Key>`。移除站点 Base URL 末尾的 `/v1`，保留部署路径前缀。响应示例：
+
+```json
+{
+  "items": [{
+    "id": "1", "at": "2026-10-22T00:00:00+00:00", "type": 2,
+    "modelName": "MODEL", "tokenName": "日常 Key", "quota": 12500,
+    "promptTokens": 120, "completionTokens": 30, "useTime": 4,
+    "isStream": true, "group": "default", "content": "", "other": "{}"
+  }],
+  "queriedAt": "2026-10-22T00:00:01+00:00",
+  "lastRoute": "direct", "lastProxy": null
+}
+```
+
+`at` 从站点 `created_at` Unix 秒转换为 UTC，缺失或无效时为 `null`；展示时仅做时区转换，不应用宿主时差。数值和流式字段缺失时为 `null`。`quota` 是站点原始单位，无内置美元换算。`other` 保留为文本，单条最多 16 KiB；`content` 最多 8 KiB，其余文本最多 2 KiB。文本中的当前 API Key 会隐藏。
+
+支持上游 `{success:true,data:[...]}` 与 `{success:true,data:{items:[...]}}`，按日志时间倒序返回。只有明确的成功数组才返回成功；缺失数据、HTML 和 `success:false` 均返回错误。此接口只查询站点返回的最近记录，无服务端翻页或筛选参数；页面对返回记录本地分页和筛选，消费汇总仅使用 `type=2`。
+
+查询不写入插件状态或历史，不改变任务运行。总超时 20 秒，响应上限 2 MiB，禁止重定向。站点 HTTP 错误、网络错误、格式不兼容或响应过大返回 502 和 `error`；超时返回 504；代理不可用返回 503、`code=proxy_unavailable`。调用方或插件关闭的取消会传播并释放管理锁。
 
 ### 保存账号
 
@@ -144,6 +174,6 @@
 
 ## 状态码
 
-400 参数错误；404 资源不存在；409 修订冲突或操作不适用；503 插件停止或存储不可用。
+400 参数错误；404 资源不存在；409 修订冲突或操作不适用；502 站点使用日志查询失败；503 插件停止、代理或存储不可用；504 站点使用日志查询超时。
 
 宿主管理接口请求体上限为 1 MiB。
