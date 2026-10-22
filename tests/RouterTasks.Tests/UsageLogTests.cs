@@ -143,12 +143,113 @@ public sealed class UsageLogTests
     [TestMethod]
     public async Task OversizeResponseIsRejectedInsteadOfReturningTruncatedRecords()
     {
-        var body = "{\"success\":true,\"data\":[],\"padding\":\"" + new string('x', 2 * 1024 * 1024) + "\"}";
+        var body = "{\"success\":true,\"data\":[],\"padding\":\"" + new string('x', 16 * 1024 * 1024) + "\"}";
         await using var f = new Fixture(handler: (_, _) => Task.FromResult(Fixture.Response(200, body, "application/json")));
         await Seed(f);
         var result = await f.Plugin.QueryUsageLogsAsync(Fixture.Context(new IdInput("task")));
         Assert.AreEqual(502, result.StatusCode);
-        StringAssert.Contains(((JsonElement)result.Body!).GetProperty("error").GetString()!, "2 MiB");
+        StringAssert.Contains(((JsonElement)result.Body!).GetProperty("error").GetString()!, "16 MiB");
+    }
+
+    [TestMethod]
+    public async Task LogsLargerThanTwoMiBAreReadInFullAndChallengeWordsInsideJsonDoNotTriggerRetries()
+    {
+        var calls = 0;
+        var body = JsonSerializer.Serialize(new { success = true, data = new[] { new { id = 1, type = 2,
+            content = "captcha acw_sc__v2 var arg1= 访问验证", other = new string('x', 2 * 1024 * 1024) } } });
+        await using var f = new Fixture(handler: (_, _) => { calls++; return Task.FromResult(Fixture.Response(200, body, "application/json")); });
+        await Seed(f);
+        var result = await f.Plugin.QueryUsageLogsAsync(Fixture.Context(new IdInput("task")));
+        Assert.AreEqual(200, result.StatusCode); Assert.AreEqual(1, calls);
+        var log = JsonData.Read<TokenUsageLogs>(result.Body).Items.Single();
+        StringAssert.Contains(log.Content, "captcha");
+        Assert.AreEqual(16384, log.Other.Length);
+    }
+
+    [TestMethod]
+    [DataRow(200)]
+    [DataRow(403)]
+    [DataRow(412)]
+    public async Task StaticCookieChallengeRetriesOnceWithTheSameClientAndCredential(int challengeStatus)
+    {
+        var calls = 0;
+        await using var f = new Fixture(handler: (request, _) =>
+        {
+            calls++;
+            Assert.AreEqual(HttpMethod.Get, request.Method);
+            Assert.AreEqual("Bearer " + Key, request.Headers.Authorization!.ToString());
+            Assert.IsTrue(request.Headers.UserAgent.Count > 0);
+            if (calls == 1)
+            {
+                Assert.IsFalse(request.Headers.Contains("Cookie"));
+                return Task.FromResult(Fixture.Response(challengeStatus, CookieChallenge(), "text/html"));
+            }
+            Assert.AreEqual("acw_sc__v2=3000176000856006061501533003690027800375", request.Headers.GetValues("Cookie").Single());
+            return Task.FromResult(Fixture.Response(200, LogBody, "application/json"));
+        });
+        await Seed(f);
+        var before = JsonSerializer.Serialize(await f.Plugin.Store.ReadAsync(), JsonData.Options);
+        var result = await f.Plugin.QueryUsageLogsAsync(Fixture.Context(new IdInput("task")));
+        Assert.AreEqual(200, result.StatusCode); Assert.AreEqual(2, calls);
+        f.Http.Verify(h => h.CreateDirectClient(It.IsAny<PluginHttpClientOptions>()), Times.Once);
+        Assert.AreEqual(before, JsonSerializer.Serialize(await f.Plugin.Store.ReadAsync(), JsonData.Options));
+        Assert.IsFalse(JsonSerializer.Serialize(result.Body).Contains("acw_sc__v2", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task RepeatedOrUnsupportedChallengeStopsWithoutExecutingScriptsOrLooping()
+    {
+        foreach (var body in new[] { CookieChallenge(), "<html><script>captcha();</script></html>" })
+        {
+            var calls = 0;
+            await using var f = new Fixture(handler: (_, _) => { calls++; return Task.FromResult(Fixture.Response(200, body, "text/html")); });
+            await Seed(f);
+            var result = await f.Plugin.QueryUsageLogsAsync(Fixture.Context(new IdInput("task")));
+            Assert.AreEqual(502, result.StatusCode);
+            Assert.AreEqual(body.Contains("arg1", StringComparison.Ordinal) ? 2 : 1, calls);
+            StringAssert.Contains(((JsonElement)result.Body!).GetProperty("error").GetString()!, "验证");
+        }
+    }
+
+    [TestMethod]
+    [DataRow(200)]
+    [DataRow(403)]
+    public async Task WafRateLimitIsReportedWithoutAttemptingCookieRetries(int status)
+    {
+        var calls = 0;
+        await using var f = new Fixture(handler: (_, _) =>
+        { calls++; return Task.FromResult(Fixture.Response(status, "<html>http_ratelimit</html>", "text/html")); });
+        await Seed(f);
+        var result = await f.Plugin.QueryUsageLogsAsync(Fixture.Context(new IdInput("task")));
+        Assert.AreEqual(502, result.StatusCode); Assert.AreEqual(1, calls);
+        StringAssert.Contains(((JsonElement)result.Body!).GetProperty("error").GetString()!, "当前出口");
+    }
+
+    [TestMethod]
+    public async Task ChallengeRetryCancellationPropagatesWithoutAnExtraRequest()
+    {
+        var calls = 0;
+        using var cancel = new CancellationTokenSource();
+        await using var f = new Fixture(handler: (request, _) =>
+        {
+            calls++;
+            if (calls == 1) return Task.FromResult(Fixture.Response(200, CookieChallenge(), "text/html"));
+            cancel.Cancel(); throw new OperationCanceledException(cancel.Token);
+        });
+        await Seed(f);
+        var context = new PluginHttpContext { Body = new IdInput("task"), CancellationToken = cancel.Token };
+        await Assert.ThrowsAsync<OperationCanceledException>(() => f.Plugin.QueryUsageLogsAsync(context));
+        Assert.AreEqual(2, calls);
+        Assert.AreEqual(200, (await f.Plugin.StateAsync(Fixture.Context())).StatusCode);
+    }
+
+    private static string CookieChallenge()
+    {
+        const string alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/";
+        var encoded = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes("3000176000856006061501533003690027800375"));
+        var custom = string.Concat(encoded.Select(c => c == '=' ? '=' : alphabet["ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".IndexOf(c)]));
+        return "<html><script>var arg1='0000000000000000000000000000000000000000';var N=['" + custom + "'];var m=[" +
+            string.Join(',', Enumerable.Range(1, 40)) + "];document.cookie='acw_sc__v2=';</script></html>";
     }
 
     [TestMethod]
@@ -187,10 +288,14 @@ public sealed class UsageLogTests
             Username = "proxy-user-private", Password = "proxy-password-private" };
         proxies.Setup(p => p.ListAsync(It.IsAny<CancellationToken>())).ReturnsAsync(new[] { node });
         sources.Setup(s => s.ListAsync(It.IsAny<CancellationToken>())).ReturnsAsync(Array.Empty<ProxySubscription>());
+        var calls = 0;
         clients.Setup(c => c.CreateClient(node, "router-tasks")).Returns(() => new HttpClient(new Handler((request, _) =>
         {
+            calls++;
             Assert.AreEqual("/api/log/token", request.RequestUri!.AbsolutePath);
             Assert.AreEqual("Bearer " + Key, request.Headers.Authorization!.ToString());
+            if (calls == 1) return Task.FromResult(Fixture.Response(200, CookieChallenge(), "text/html"));
+            Assert.IsTrue(request.Headers.Contains("Cookie"));
             return Task.FromResult(Fixture.Response(200, LogBody, "application/json"));
         })));
         var plugin = new RouterTasksTerminal(f.Services.Object, f.Directory, f.Clock, serviceHost: host.Object);
@@ -211,6 +316,7 @@ public sealed class UsageLogTests
             Assert.AreEqual("http://127.0.0.1:3128", logs.LastProxy.Address);
             var json = JsonSerializer.Serialize(result.Body);
             Assert.IsFalse(json.Contains("private", StringComparison.Ordinal));
+            Assert.AreEqual(2, calls);
             clients.Verify(c => c.CreateClient(node, "router-tasks"), Times.Once);
             f.Http.Verify(h => h.CreateDirectClient(It.IsAny<PluginHttpClientOptions>()), Times.Never);
         }

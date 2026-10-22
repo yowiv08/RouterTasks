@@ -18,7 +18,7 @@ export async function fixtureData() {
   templates[0].body = templates[0].body.replace(/}$/, ',"unknown":{"id":9007199254740993123456789,"decimal":1.0000000000000000000001}}');
   const settings = { maxEventsPerTask:200, summaryBytes:8192, historyDays:30, telegramEnabled:false, barkEnabled:false,
     barkServer:'https://api.day.app', notificationMaxAttempts:10, notificationRetrySeconds:5, notificationMaxRetrySeconds:3600, maxNotificationRecords:1000 };
-  return { version:'0.3.3', revision:1, sites:[{id:'site',name:'模拟站点',baseUrl:'http://127.0.0.1',route:'direct',subscriptionIds:[],queueHttpStatuses:[500],revision:1}],
+  return { version:'0.3.4', revision:1, sites:[{id:'site',name:'模拟站点',baseUrl:'http://127.0.0.1',route:'direct',subscriptionIds:[],queueHttpStatuses:[500],revision:1}],
     keys:[{id:'key',siteId:'site',alias:'模拟账号',token:'TOKEN-fixture-only',credentialVersion:1,authStatus:'unchecked',models:['MODEL'],usedUsd:null,limitUsd:null}],
     templates, tasks:[], stats:[], notifications:[], settings, activeCount:0, accountSecrets:{}, notificationCredentials:{telegramConfigured:false,barkConfigured:false,credentialVersion:0} };
 }

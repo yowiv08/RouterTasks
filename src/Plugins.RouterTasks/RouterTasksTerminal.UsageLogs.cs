@@ -13,7 +13,7 @@ public sealed record TokenUsageLogs(TokenUsageLog[] Items, DateTimeOffset Querie
 
 public sealed partial class RouterTasksTerminal
 {
-    private const int UsageLogMaxBytes = 2 * 1024 * 1024;
+    private const int UsageLogMaxBytes = 16 * 1024 * 1024;
 
     // 管理桥只传账号 ID；Key 从宿主凭据服务读取，不进入浏览器 URL 或插件状态。
     [PluginEndpoint("POST", "accounts/usage-logs")]
@@ -35,30 +35,69 @@ public sealed partial class RouterTasksTerminal
             await _host.Http.ApproveOriginAsync(Validation.BaseUri(site.BaseUrl).GetLeftPart(UriPartial.Authority), timeout.Token);
             ProxyPoolNode? proxy = null;
             using var client = await _network.CreateClientAsync(site, timeout.Token, selected => proxy = selected);
-            using var request = new HttpRequestMessage(HttpMethod.Get, UsageLogEndpoint(site.BaseUrl, secret));
-            // 旧站点读取 key 查询参数；新版本 New API 使用只读 Bearer 认证。
-            request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + secret);
-            request.Headers.TryAddWithoutValidation("Accept", "application/json");
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
-            if (!response.IsSuccessStatusCode)
+            var endpoint = UsageLogEndpoint(site.BaseUrl, secret);
+            async Task<HttpResponseMessage> Get(string? cookie = null)
             {
-                var status = (int)response.StatusCode;
-                var message = status switch
-                {
-                    404 or 405 or 501 => "此站点不支持 Token 使用日志接口",
-                    401 or 403 => "使用日志查询鉴权失败，请检查 API Key 和站点权限",
-                    429 => "站点限制使用日志查询频率，请稍后重试",
-                    >= 300 and < 400 => "使用日志接口返回重定向，请检查站点地址",
-                    _ => "站点使用日志查询失败"
-                };
-                return context.Json(502, new { error = $"{message}（HTTP {status}）" });
+                using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
+                // 旧站点读取 key 查询参数；新版本 New API 使用只读 Bearer 认证。
+                request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + secret);
+                request.Headers.TryAddWithoutValidation("Accept", "application/json");
+                request.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+                if (cookie is not null) request.Headers.TryAddWithoutValidation("Cookie", cookie);
+                return await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
             }
-            var body = await HttpProbeClient.ReadLimitedAsync(response.Content, UsageLogMaxBytes + 1, timeout.Token);
-            if (System.Text.Encoding.UTF8.GetByteCount(body) > UsageLogMaxBytes)
-                return context.Json(502, new { error = "使用日志响应超过 2 MiB，请在站点缩小返回范围后重试" });
-            var items = ParseUsageLogs(body, secret);
-            timeout.Token.ThrowIfCancellationRequested();
-            return context.Ok(new TokenUsageLogs(items, _clock.Now, site.Route, proxy));
+            async Task<string> Read(HttpResponseMessage response)
+            {
+                var body = await HttpProbeClient.ReadLimitedAsync(response.Content, UsageLogMaxBytes + 1, timeout.Token);
+                if (System.Text.Encoding.UTF8.GetByteCount(body) > UsageLogMaxBytes)
+                    throw new FormatException("使用日志响应超过 16 MiB，请在站点缩小返回范围后重试");
+                return body;
+            }
+            using var first = await Get();
+            HttpResponseMessage response = first;
+            HttpResponseMessage? verified = null;
+            string? body = null;
+            try
+            {
+                // 只对静态 Cookie 验证重试只读 GET；不执行站点脚本、不持久化 Cookie。
+                if ((int)first.StatusCode is 200 or 403 or 412)
+                {
+                    body = await Read(first);
+                    if (IsUsageLogRateLimited(body))
+                        return context.Json(502, new { error = "站点限制当前出口的使用日志查询频率，请稍后重试或检查代理" });
+                    if (UsageLogWaf.IsChallenge(body))
+                    {
+                        var cookie = UsageLogWaf.Solve(body);
+                        if (cookie is null) return context.Json(502, new { error = "站点使用日志需要网页验证，当前验证格式不支持" });
+                        timeout.Token.ThrowIfCancellationRequested();
+                        verified = await Get(cookie);
+                        response = verified;
+                        body = await Read(verified);
+                        if (IsUsageLogRateLimited(body))
+                            return context.Json(502, new { error = "站点限制当前出口的使用日志查询频率，请稍后重试或检查代理" });
+                        if (UsageLogWaf.IsChallenge(body))
+                            return context.Json(502, new { error = "站点使用日志验证未通过，请检查网络或代理后重试" });
+                    }
+                }
+                if (!response.IsSuccessStatusCode)
+                {
+                    var status = (int)response.StatusCode;
+                    var message = status switch
+                    {
+                        404 or 405 or 501 => "此站点不支持 Token 使用日志接口",
+                        401 or 403 => "使用日志查询鉴权失败，请检查 API Key 和站点权限",
+                        429 => "站点限制使用日志查询频率，请稍后重试",
+                        >= 300 and < 400 => "使用日志接口返回重定向，请检查站点地址",
+                        _ => "站点使用日志查询失败"
+                    };
+                    return context.Json(502, new { error = $"{message}（HTTP {status}）" });
+                }
+                body ??= await Read(response);
+                var items = ParseUsageLogs(body, secret);
+                timeout.Token.ThrowIfCancellationRequested();
+                return context.Ok(new TokenUsageLogs(items, _clock.Now, site.Route, proxy));
+            }
+            finally { verified?.Dispose(); }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested || _httpShutdown.IsCancellationRequested) { throw; }
         catch (OperationCanceledException)
@@ -82,11 +121,14 @@ public sealed partial class RouterTasksTerminal
         return builder.Uri;
     }
 
+    private static bool IsUsageLogRateLimited(string body)
+        => body.TrimStart().StartsWith('<') && body.Contains("http_ratelimit", StringComparison.OrdinalIgnoreCase);
+
     internal static TokenUsageLog[] ParseUsageLogs(string body, string secret)
     {
         JsonNode? root;
         try { root = JsonNode.Parse(body); }
-        catch (JsonException) { throw new FormatException("站点未返回有效的使用日志 JSON"); }
+        catch (JsonException) { throw new FormatException("站点未返回有效的使用日志 JSON，请检查站点地址或网页验证"); }
         if (root is not JsonObject envelope || envelope["success"] is not JsonValue success || !success.TryGetValue<bool>(out var ok))
             throw new FormatException("站点使用日志响应格式不兼容：缺少 success");
         if (!ok)
